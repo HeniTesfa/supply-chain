@@ -137,7 +137,7 @@ jobs:
     steps:
       # Step 1: Check out the repository source code
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Step 2: Configure AWS credentials using OIDC federation
       - name: Configure AWS credentials via OIDC
@@ -244,7 +244,7 @@ jobs:
     steps:
       # Step 1: Check out repository source code
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Step 2: Configure AWS credentials using OIDC
       - name: Configure AWS credentials via OIDC
@@ -341,7 +341,7 @@ jobs:
     steps:
       # Step 1: Check out repository source code
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Step 2: Configure AWS credentials using OIDC federation
       - name: Configure AWS credentials via OIDC
@@ -430,7 +430,7 @@ jobs:
     steps:
       # Step 1: Check out repository source code
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Step 2: Configure AWS credentials using OIDC federation
       - name: Configure AWS credentials via OIDC

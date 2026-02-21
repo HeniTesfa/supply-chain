@@ -54,7 +54,7 @@ jobs:
       # Step 1: Check out the repository source code into the runner
       # This clones the full repository so Maven can access all 8 service modules
       - name: Checkout source code
-        uses: actions/checkout@v4  # Official GitHub action for git checkout
+        uses: actions/checkout@v6  # Official GitHub action for git checkout
 
       # Step 2: Set up Java Development Kit (JDK) 17 using Eclipse Temurin distribution
       # Temurin is the Eclipse Foundation's free, production-ready OpenJDK build
@@ -119,7 +119,7 @@ jobs:
     steps:
       # Step 1: Check out the repository source code
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Step 2: Set up Node.js 18 runtime environment
       # Node 18 is the LTS version matching the Dockerfile's node:18-alpine base image
@@ -187,7 +187,7 @@ jobs:
     steps:
       # Step 1: Check out the repository source code
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Step 2: Set up Node.js 18 runtime environment
       - name: Set up Node.js 18
@@ -270,7 +270,7 @@ jobs:
       # Full checkout is needed because all Dockerfiles use the root as build context
       # (e.g., they COPY pom.xml from root and multiple service directories)
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Step 2: Set up Docker Buildx for enhanced build capabilities
       # Buildx provides build caching, multi-platform support, and better performance

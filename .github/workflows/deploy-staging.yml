@@ -97,7 +97,7 @@ jobs:
       # Step 1: Check out the repository source code
       # All Dockerfiles use root as build context, so we need the full checkout
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Step 2: Configure AWS credentials using OIDC (OpenID Connect)
       # OIDC is more secure than storing long-lived AWS access keys as secrets
@@ -191,7 +191,7 @@ jobs:
     steps:
       # Step 1: Check out the repository to access ECS task definition templates
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Step 2: Configure AWS credentials for ECS deployment operations
       - name: Configure AWS credentials via OIDC
