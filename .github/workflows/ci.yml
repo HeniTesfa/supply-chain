@@ -124,7 +124,7 @@ jobs:
       # Step 2: Set up Node.js 18 runtime environment
       # Node 18 is the LTS version matching the Dockerfile's node:18-alpine base image
       - name: Set up Node.js 18
-        uses: actions/setup-node@v4  # Official GitHub action for Node.js setup
+        uses: actions/setup-node@v6  # Official GitHub action for Node.js setup
         with:
           # Use Node.js 18 to match the production Dockerfile environment
           node-version: '18'
@@ -191,7 +191,7 @@ jobs:
 
       # Step 2: Set up Node.js 18 runtime environment
       - name: Set up Node.js 18
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           # Use Node.js 18 LTS to match the Dockerfile base image
           node-version: '18'
