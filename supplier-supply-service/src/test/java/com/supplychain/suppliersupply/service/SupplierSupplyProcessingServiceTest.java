@@ -1,13 +1,23 @@
 package com.supplychain.suppliersupply.service;
 
+import com.supplychain.suppliersupply.entity.SupplierSupplyEntity;
+import com.supplychain.suppliersupply.repository.SupplierSupplyRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.assertThatNoException;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.lenient;
 
 /**
  * Unit tests for {@link SupplierSupplyProcessingService}.
@@ -18,16 +28,24 @@ import static org.assertj.core.api.Assertions.assertThatNoException;
  * - Reorder point monitoring and low stock alert logic
  * - Total supply calculation across quantity states
  *
- * This is a pure unit test — no Spring context or mocks needed since the service
- * has zero injected dependencies.
+ * SupplierSupplyRepository is mocked via Mockito to isolate from MongoDB.
  */
+@ExtendWith(MockitoExtension.class)
 class SupplierSupplyProcessingServiceTest {
 
+    @Mock
+    private SupplierSupplyRepository supplierSupplyRepository;
+
+    @InjectMocks
     private SupplierSupplyProcessingService service;
 
     @BeforeEach
     void setUp() {
-        service = new SupplierSupplyProcessingService();
+        // Lenient stubs — not all tests reach saveSupplierSupply(); validation tests throw first.
+        lenient().when(supplierSupplyRepository.findBySkuId(anyString()))
+                .thenReturn(Collections.emptyList());
+        lenient().when(supplierSupplyRepository.save(any(SupplierSupplyEntity.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
     }
 
     // ==================== Required Field: SKU ID ====================
@@ -42,14 +60,14 @@ class SupplierSupplyProcessingServiceTest {
                 .hasMessageContaining("SKU ID is required");
     }
 
-    /** Verifies that a null SKU ID value is caught as empty. */
+    /** Verifies that a null SKU ID value is caught (combined null+missing check). */
     @Test
     void processSupplierSupply_nullSkuId_throws() {
         Map<String, Object> event = validEvent();
         event.put("skuId", null);
         assertThatThrownBy(() -> service.processSupplierSupply(event))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("SKU ID cannot be empty");
+                .hasMessageContaining("SKU ID is required");
     }
 
     /** Verifies that a blank/whitespace-only SKU ID is rejected. */
@@ -74,14 +92,14 @@ class SupplierSupplyProcessingServiceTest {
                 .hasMessageContaining("Warehouse ID is required");
     }
 
-    /** Verifies that a null Warehouse ID value is caught as empty. */
+    /** Verifies that a null Warehouse ID value is caught (combined null+missing check). */
     @Test
     void processSupplierSupply_nullWarehouseId_throws() {
         Map<String, Object> event = validEvent();
         event.put("warehouseId", null);
         assertThatThrownBy(() -> service.processSupplierSupply(event))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("Warehouse ID cannot be empty");
+                .hasMessageContaining("Warehouse ID is required");
     }
 
     /** Verifies that a blank/whitespace-only Warehouse ID is rejected. */

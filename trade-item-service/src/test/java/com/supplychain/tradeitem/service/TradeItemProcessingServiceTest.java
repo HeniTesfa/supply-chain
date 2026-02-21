@@ -1,15 +1,25 @@
 package com.supplychain.tradeitem.service;
 
+import com.supplychain.tradeitem.entity.TradeItemEntity;
+import com.supplychain.tradeitem.repository.TradeItemRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.assertThatNoException;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.lenient;
 
 /**
  * Unit tests for {@link TradeItemProcessingService}.
@@ -21,16 +31,23 @@ import static org.assertj.core.api.Assertions.assertThatNoException;
  * - Lead time validation (must be >= 0)
  * - Supplier and ordering info processing
  *
- * This is a pure unit test — no Spring context or mocks needed since the service
- * has zero injected dependencies.
+ * TradeItemRepository is mocked via Mockito to isolate from MongoDB.
  */
+@ExtendWith(MockitoExtension.class)
 class TradeItemProcessingServiceTest {
 
+    @Mock
+    private TradeItemRepository tradeItemRepository;
+
+    @InjectMocks
     private TradeItemProcessingService service;
 
     @BeforeEach
     void setUp() {
-        service = new TradeItemProcessingService();
+        // Lenient stubs — not all tests reach saveTradeItem(); validation tests throw first.
+        lenient().when(tradeItemRepository.findByGtin(anyString())).thenReturn(Optional.empty());
+        lenient().when(tradeItemRepository.save(any(TradeItemEntity.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
     }
 
     // ==================== GTIN Format Validation ====================

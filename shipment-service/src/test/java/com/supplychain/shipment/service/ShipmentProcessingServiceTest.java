@@ -1,15 +1,25 @@
 package com.supplychain.shipment.service;
 
+import com.supplychain.shipment.entity.ShipmentEntity;
+import com.supplychain.shipment.repository.ShipmentRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.assertThatNoException;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.lenient;
 
 /**
  * Unit tests for {@link ShipmentProcessingService}.
@@ -21,16 +31,23 @@ import static org.assertj.core.api.Assertions.assertThatNoException;
  * - Case-insensitive status matching
  * - Location tracking with IN_TRANSIT status
  *
- * This is a pure unit test — no Spring context or mocks needed since the service
- * has zero injected dependencies.
+ * ShipmentRepository is mocked via Mockito to isolate from MongoDB.
  */
+@ExtendWith(MockitoExtension.class)
 class ShipmentProcessingServiceTest {
 
+    @Mock
+    private ShipmentRepository shipmentRepository;
+
+    @InjectMocks
     private ShipmentProcessingService service;
 
     @BeforeEach
     void setUp() {
-        service = new ShipmentProcessingService();
+        // Lenient stubs — not all tests reach saveShipment(); validation tests throw first.
+        lenient().when(shipmentRepository.findByTrackingNumber(anyString())).thenReturn(Optional.empty());
+        lenient().when(shipmentRepository.save(any(ShipmentEntity.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
     }
 
     // ==================== Required Field: Tracking Number ====================

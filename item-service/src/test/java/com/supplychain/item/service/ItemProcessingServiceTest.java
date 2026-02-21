@@ -1,20 +1,27 @@
 package com.supplychain.item.service;
 
+import com.supplychain.item.entity.ItemEntity;
+import com.supplychain.item.repository.ItemRepository;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.assertThatNoException;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for {@link ItemProcessingService}.
@@ -27,12 +34,13 @@ import static org.assertj.core.api.Assertions.assertThatNoException;
  * - Behavior when all retries are exhausted
  *
  * Uses MockWebServer to simulate the external OSP API without real HTTP calls.
- * The service is instantiated directly with reflection to set @Value fields.
+ * ItemRepository is mocked via Mockito to isolate from MongoDB.
  */
 class ItemProcessingServiceTest {
 
     private MockWebServer mockWebServer;
     private ItemProcessingService service;
+    private ItemRepository itemRepository;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -42,9 +50,14 @@ class ItemProcessingServiceTest {
         String baseUrl = mockWebServer.url("/").toString();
         baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
 
+        itemRepository = Mockito.mock(ItemRepository.class);
+        when(itemRepository.findBySkuId(anyString())).thenReturn(Optional.empty());
+        when(itemRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
         service = new ItemProcessingService(WebClient.builder());
         setField(service, "ospApiUrl", baseUrl);
         setField(service, "maxRetryAttempts", 3);
+        setField(service, "itemRepository", itemRepository);
     }
 
     @AfterEach

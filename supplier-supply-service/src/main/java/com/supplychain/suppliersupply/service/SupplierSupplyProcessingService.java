@@ -79,6 +79,10 @@ public class SupplierSupplyProcessingService {
         if (reservedQty != null && reservedQty < 0) {
             throw new IllegalArgumentException("Reserved quantity cannot be negative: " + reservedQty);
         }
+        Integer onOrderQty = getIntValue(event, "onOrderQuantity");
+        if (onOrderQty != null && onOrderQty < 0) {
+            throw new IllegalArgumentException("On-order quantity cannot be negative: " + onOrderQty);
+        }
     }
 
     private void checkReorderPoint(String skuId, String warehouseId, Integer availableQty, Integer reorderPoint) {
