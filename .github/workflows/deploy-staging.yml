@@ -1,0 +1,268 @@
+# =============================================================================
+# Staging Deployment Workflow - Deploy to AWS ECS Staging Environment
+# =============================================================================
+# This workflow automatically deploys all services to the staging environment
+# whenever code is pushed to the main branch. It builds Docker images, pushes
+# them to Amazon ECR (Elastic Container Registry), and deploys to ECS
+# (Elastic Container Service) using rolling updates.
+#
+# Prerequisites (configured as GitHub repository secrets):
+#   - AWS_ACCOUNT_ID: The 12-digit AWS account number
+#   - AWS_REGION: The AWS region (e.g., us-east-1)
+#   - AWS_IAM_ROLE_ARN: IAM role ARN for GitHub OIDC authentication
+#   - ECS_CLUSTER_STAGING: Name of the ECS cluster for staging
+# =============================================================================
+
+# Name displayed in the GitHub Actions UI for this workflow
+name: Deploy to Staging
+
+# ---- Trigger Configuration ----
+# Only deploy to staging when code is pushed (merged) to the main branch
+on:
+  push:
+    branches:
+      - main  # Trigger on every push to main (typically via merged PRs)
+
+# ---- Environment Variables ----
+# Global environment variables available to all jobs and steps in this workflow
+env:
+  # The ECR registry URL pattern: <account_id>.dkr.ecr.<region>.amazonaws.com
+  # This is constructed from GitHub secrets to avoid hardcoding AWS account details
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+  # Use the full Git commit SHA as the Docker image tag for traceability
+  # This creates a 1:1 mapping between a deployed image and the exact source code
+  IMAGE_TAG: ${{ github.sha }}
+
+# ---- Concurrency Control ----
+# Prevent multiple staging deployments from running simultaneously
+concurrency:
+  # All staging deployments share the same concurrency group
+  group: deploy-staging
+  # Cancel any in-progress staging deployment when a newer commit is pushed
+  # This ensures only the latest code gets deployed to staging
+  cancel-in-progress: true
+
+# ---- Permissions ----
+# Minimal permissions required for this workflow
+permissions:
+  # Allow reading repository contents (for checkout)
+  contents: read
+  # Allow requesting OIDC tokens for AWS authentication
+  # This is required by aws-actions/configure-aws-credentials with OIDC
+  id-token: write
+
+# ---- Job Definitions ----
+jobs:
+
+  # ===========================================================================
+  # Job 1: Build Docker Images and Push to ECR
+  # ===========================================================================
+  # Builds Docker images for all 10 services using a matrix strategy and pushes
+  # them to their respective ECR repositories. Each service gets its own ECR
+  # repository following the naming pattern: supply-chain-<service-name>
+  # ===========================================================================
+  build-and-push:
+    # Display name includes the service name from the matrix for clarity
+    name: Build & Push - ${{ matrix.service }}
+    # Run on the latest Ubuntu runner
+    runs-on: ubuntu-latest
+
+    # ---- Matrix Strategy ----
+    # Build all 10 services in parallel to minimize total deployment time
+    strategy:
+      # Do not cancel other builds if one service fails
+      # This shows all failures at once for easier debugging
+      fail-fast: false
+      matrix:
+        # All 10 services that need Docker images built and pushed
+        service:
+          - consumer-service        # Kafka consumer with deduplication (port 8081)
+          - loader-service          # Event router to downstream services (port 8082)
+          - item-service            # Item processing with OSP API calls (port 8083)
+          - trade-item-service      # GTIN/supplier management (port 8084)
+          - supplier-supply-service # Supplier level tracking (port 8085)
+          - shipment-service        # Shipment tracking (port 8086)
+          - producer-service        # REST API, publishes to Kafka (port 8087)
+          - osp-mock-api            # Mock external OSP API (port 9000)
+          - producer-ui             # React event creation form (port 3000)
+          - monitoring-ui           # React error monitoring dashboard (port 3001)
+
+    # ---- Job Outputs ----
+    # Export the full image URI so the deploy job can reference it
+    outputs:
+      # The image tag used for all services (same commit SHA)
+      image_tag: ${{ env.IMAGE_TAG }}
+
+    steps:
+      # Step 1: Check out the repository source code
+      # All Dockerfiles use root as build context, so we need the full checkout
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # Step 2: Configure AWS credentials using OIDC (OpenID Connect)
+      # OIDC is more secure than storing long-lived AWS access keys as secrets
+      # It works by: GitHub issues a short-lived OIDC token -> AWS verifies it ->
+      # AWS issues temporary credentials scoped to the IAM role
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4  # Official AWS credentials action
+        with:
+          # The IAM role ARN that GitHub Actions will assume
+          # This role must have a trust policy allowing GitHub's OIDC provider
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          # The AWS region where ECR and ECS resources are located
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Step 3: Authenticate Docker to Amazon ECR
+      # This step logs the Docker CLI into ECR so it can push images
+      # The login token is valid for 12 hours
+      - name: Login to Amazon ECR
+        id: ecr-login  # ID to reference this step's outputs if needed
+        uses: aws-actions/amazon-ecr-login@v2  # Official AWS ECR login action
+
+      # Step 4: Set up Docker Buildx for enhanced build features
+      # Buildx provides build caching and multi-platform support
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Step 5: Build the Docker image and push it to ECR
+      # Uses the docker/build-push-action for efficient builds with caching
+      - name: Build and push Docker image for ${{ matrix.service }}
+        uses: docker/build-push-action@v6
+        with:
+          # Use the repository root as the Docker build context
+          # This matches docker-compose.yml where all services use context: .
+          context: .
+          # Each service has its Dockerfile in its own directory
+          file: ./${{ matrix.service }}/Dockerfile
+          # Push the built image to ECR (unlike CI which only builds)
+          push: true
+          # Tag the image with both the commit SHA (for traceability) and 'latest'
+          # The commit SHA tag enables precise rollback to any previous deployment
+          # The 'latest' tag provides a convenient reference to the newest image
+          tags: |
+            ${{ env.ECR_REGISTRY }}/supply-chain-${{ matrix.service }}:${{ env.IMAGE_TAG }}
+            ${{ env.ECR_REGISTRY }}/supply-chain-${{ matrix.service }}:latest
+          # Enable GitHub Actions cache for Docker build layers
+          # This significantly speeds up builds when only source code changes
+          # (base image layers and dependency layers are cached)
+          cache-from: type=gha  # Pull cached layers from previous builds
+          cache-to: type=gha,mode=max  # Cache all layers for maximum reuse
+
+  # ===========================================================================
+  # Job 2: Deploy to ECS Staging Environment
+  # ===========================================================================
+  # After all images are built and pushed, update the ECS task definitions
+  # with the new image URIs and deploy them to the staging ECS cluster.
+  # ECS performs a rolling update, replacing old containers with new ones.
+  # ===========================================================================
+  deploy-staging:
+    # Display name includes the service name from the matrix
+    name: Deploy Staging - ${{ matrix.service }}
+    # Run on the latest Ubuntu runner
+    runs-on: ubuntu-latest
+    # Only run after ALL service images are built and pushed successfully
+    needs: build-and-push
+    # Associate this job with the 'staging' GitHub environment
+    # This enables environment-specific secrets and deployment protection rules
+    environment:
+      name: staging
+      # Construct a URL to the deployed service for the GitHub deployments page
+      url: https://staging.supplychain.example.com
+
+    # ---- Matrix Strategy ----
+    # Deploy all 10 services in parallel for fast staging updates
+    strategy:
+      # Do not cancel other deployments if one fails
+      fail-fast: false
+      matrix:
+        # All 10 services to deploy to ECS
+        service:
+          - consumer-service
+          - loader-service
+          - item-service
+          - trade-item-service
+          - supplier-supply-service
+          - shipment-service
+          - producer-service
+          - osp-mock-api
+          - producer-ui
+          - monitoring-ui
+
+    steps:
+      # Step 1: Check out the repository to access ECS task definition templates
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # Step 2: Configure AWS credentials for ECS deployment operations
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # Assume the IAM role with permissions to update ECS services
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          # Deploy to the same region where the ECS cluster lives
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Step 3: Download the current ECS task definition for this service
+      # We fetch the existing definition and only update the image field
+      # This preserves all other task configuration (CPU, memory, env vars, etc.)
+      - name: Download current ECS task definition
+        run: |
+          # Use AWS CLI to describe the current task definition for this service
+          # The task definition family name follows the pattern: staging-supply-chain-<service>
+          # --query extracts just the taskDefinition object (removes metadata wrapper)
+          # jq removes fields that cannot be included when registering a new revision
+          # (status, revision, registeredAt, etc. are read-only fields)
+          aws ecs describe-task-definition \
+            --task-definition staging-supply-chain-${{ matrix.service }} \
+            --query 'taskDefinition' \
+            | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
+            > task-definition.json
+
+      # Step 4: Update the container image in the task definition
+      # This action modifies the task-definition.json to point to the new image
+      - name: Update ECS task definition with new image
+        id: update-task-def  # ID to reference the output file path
+        uses: aws-actions/amazon-ecs-render-task-definition@v1  # Official ECS render action
+        with:
+          # Path to the task definition JSON downloaded in the previous step
+          task-definition: task-definition.json
+          # Name of the container within the task definition to update
+          # Matches the container name configured in the ECS task
+          container-name: ${{ matrix.service }}
+          # The new image URI with the commit SHA tag from the build job
+          image: ${{ env.ECR_REGISTRY }}/supply-chain-${{ matrix.service }}:${{ env.IMAGE_TAG }}
+
+      # Step 5: Deploy the updated task definition to ECS
+      # This registers a new task definition revision and updates the ECS service
+      - name: Deploy to ECS staging
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2  # Official ECS deploy action
+        with:
+          # Use the updated task definition from the render step
+          task-definition: ${{ steps.update-task-def.outputs.task-definition }}
+          # The ECS service name follows the pattern: staging-supply-chain-<service>
+          service: staging-supply-chain-${{ matrix.service }}
+          # The ECS cluster where the staging services run
+          cluster: ${{ secrets.ECS_CLUSTER_STAGING }}
+          # Wait for the ECS service to reach a stable state after deployment
+          # This means all new tasks are running and healthy, and old tasks are stopped
+          # If the service doesn't stabilize within 10 minutes, the step fails
+          wait-for-service-stability: true
+
+      # Step 6: Verify the deployment by checking the ECS service status
+      # This provides a clear success/failure message in the workflow logs
+      - name: Verify deployment status
+        run: |
+          # Query the ECS service to confirm the deployment completed successfully
+          # Extract the rollout state from the latest deployment
+          DEPLOYMENT_STATUS=$(aws ecs describe-services \
+            --cluster ${{ secrets.ECS_CLUSTER_STAGING }} \
+            --services staging-supply-chain-${{ matrix.service }} \
+            --query 'services[0].deployments[0].rolloutState' \
+            --output text)
+          # Log the deployment status for visibility in the workflow output
+          echo "Deployment status for ${{ matrix.service }}: ${DEPLOYMENT_STATUS}"
+          # Fail the step if the deployment did not complete successfully
+          if [ "${DEPLOYMENT_STATUS}" != "COMPLETED" ]; then
+            echo "::error::Deployment for ${{ matrix.service }} did not complete. Status: ${DEPLOYMENT_STATUS}"
+            exit 1
+          fi

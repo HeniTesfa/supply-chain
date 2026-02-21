@@ -1,0 +1,180 @@
+# =============================================================================
+# Dependabot Configuration - Automated Dependency Update Management
+# =============================================================================
+# Dependabot automatically creates pull requests to update dependencies when
+# new versions are available. This keeps the supply chain system secure by
+# patching known vulnerabilities and up-to-date with the latest improvements.
+#
+# Configured ecosystems:
+#   1. Maven (Java backend services) - weekly
+#   2. npm (Producer UI frontend) - weekly
+#   3. npm (Monitoring UI frontend) - weekly
+#   4. GitHub Actions (CI/CD workflows) - weekly
+#   5. Docker (container base images) - monthly
+#
+# Each ecosystem check runs on the specified schedule and opens PRs against
+# the default branch when updates are found.
+# =============================================================================
+
+# Dependabot configuration file format version (required, must be 2)
+version: 2
+
+# ---- Update Configuration ----
+# List of package ecosystems to monitor for updates
+updates:
+
+  # ---------------------------------------------------------------------------
+  # 1. Maven Dependencies (Java Backend Services)
+  # ---------------------------------------------------------------------------
+  # Monitors the root pom.xml and all 8 child module POMs for dependency updates.
+  # Covers: Spring Boot, Spring Cloud, Lombok, Kafka clients, MongoDB drivers,
+  # and all other Java dependencies declared in the multi-module Maven project.
+  # ---------------------------------------------------------------------------
+  - # The package ecosystem to monitor (Maven for Java dependencies)
+    package-ecosystem: "maven"
+    # Directory containing the root pom.xml (the parent POM)
+    # Dependabot will also discover all child module POMs referenced in <modules>
+    directory: "/"
+    # Check for updates on a weekly schedule
+    # Weekly is a good balance between staying current and avoiding PR noise
+    schedule:
+      # Run the dependency check once per week
+      interval: "weekly"
+      # Run on Monday mornings so the team can review PRs at the start of the week
+      day: "monday"
+      # Use UTC timezone for consistent scheduling across team members
+      timezone: "America/New_York"
+    # Limit the number of open PRs Dependabot can create for Maven updates
+    # This prevents overwhelming the team with too many update PRs at once
+    open-pull-requests-limit: 10
+    # Add labels to Dependabot PRs for easy filtering in the PR list
+    labels:
+      - "dependencies"    # General dependency update label
+      - "java"            # Identifies this as a Java/Maven update
+      - "backend"         # Identifies this as a backend change
+    # Customize commit message format for Maven dependency updates
+    commit-message:
+      # Prefix all commit messages with "maven:" for clear identification in git log
+      prefix: "maven"
+
+  # ---------------------------------------------------------------------------
+  # 2. npm Dependencies (Producer UI - React Frontend)
+  # ---------------------------------------------------------------------------
+  # Monitors the producer-ui/package.json for dependency updates.
+  # Covers: React 18, Axios (HTTP client), and all other npm packages used
+  # by the event creation form frontend application (port 3000).
+  # ---------------------------------------------------------------------------
+  - # The package ecosystem to monitor (npm for Node.js/JavaScript dependencies)
+    package-ecosystem: "npm"
+    # Directory containing the package.json for the Producer UI application
+    directory: "/producer-ui"
+    # Check for updates weekly
+    schedule:
+      interval: "weekly"
+      # Run on Tuesday to stagger with Maven updates (Monday)
+      day: "tuesday"
+      timezone: "America/New_York"
+    # Limit open PRs to prevent PR overload
+    open-pull-requests-limit: 10
+    # Labels for easy identification and filtering of Producer UI dependency PRs
+    labels:
+      - "dependencies"    # General dependency update label
+      - "javascript"      # Identifies this as a JavaScript/npm update
+      - "frontend"        # Identifies this as a frontend change
+      - "producer-ui"     # Identifies which frontend app is affected
+    # Customize commit message format
+    commit-message:
+      # Prefix commits with "npm-producer:" for clear identification
+      prefix: "npm-producer"
+
+  # ---------------------------------------------------------------------------
+  # 3. npm Dependencies (Monitoring UI - React Frontend)
+  # ---------------------------------------------------------------------------
+  # Monitors the monitoring-ui/package.json for dependency updates.
+  # Covers: React 18, Axios, Recharts (charting library), and all other npm
+  # packages used by the error monitoring dashboard (port 3001).
+  # ---------------------------------------------------------------------------
+  - # The package ecosystem for Node.js dependencies
+    package-ecosystem: "npm"
+    # Directory containing the package.json for the Monitoring UI application
+    directory: "/monitoring-ui"
+    # Check for updates weekly
+    schedule:
+      interval: "weekly"
+      # Run on Tuesday alongside the other npm ecosystem check
+      day: "tuesday"
+      timezone: "America/New_York"
+    # Limit the number of concurrent open PRs for this ecosystem
+    open-pull-requests-limit: 10
+    # Labels for identification and filtering
+    labels:
+      - "dependencies"    # General dependency update label
+      - "javascript"      # Identifies this as a JavaScript/npm update
+      - "frontend"        # Identifies this as a frontend change
+      - "monitoring-ui"   # Identifies which frontend app is affected
+    # Customize commit message format
+    commit-message:
+      # Prefix commits with "npm-monitoring:" for clear identification
+      prefix: "npm-monitoring"
+
+  # ---------------------------------------------------------------------------
+  # 4. GitHub Actions Dependencies (CI/CD Workflow Actions)
+  # ---------------------------------------------------------------------------
+  # Monitors all workflow files in .github/workflows/ for action version updates.
+  # Covers: actions/checkout, actions/setup-java, actions/setup-node,
+  # docker/build-push-action, aws-actions/*, and all other GitHub Actions used
+  # in the CI, staging deployment, and production deployment workflows.
+  # Keeping actions up-to-date is critical for security and compatibility.
+  # ---------------------------------------------------------------------------
+  - # The package ecosystem for GitHub Actions (monitors uses: directives)
+    package-ecosystem: "github-actions"
+    # GitHub Actions workflow files are always in .github/workflows/ at the root
+    directory: "/"
+    # Check for updates weekly
+    schedule:
+      interval: "weekly"
+      # Run on Wednesday to stagger with other ecosystem checks
+      day: "wednesday"
+      timezone: "America/New_York"
+    # Limit open PRs -- GitHub Actions updates are usually small and safe
+    open-pull-requests-limit: 5
+    # Labels for identification
+    labels:
+      - "dependencies"    # General dependency update label
+      - "github-actions"  # Identifies this as a CI/CD action update
+      - "ci-cd"           # Identifies this as a CI/CD infrastructure change
+    # Customize commit message format
+    commit-message:
+      # Prefix commits with "actions:" for clear identification
+      prefix: "actions"
+
+  # ---------------------------------------------------------------------------
+  # 5. Docker Dependencies (Base Image Updates)
+  # ---------------------------------------------------------------------------
+  # Monitors all Dockerfiles for base image updates (FROM directives).
+  # Covers: maven:3.9-eclipse-temurin-17, eclipse-temurin:17-jre-alpine,
+  # node:18-alpine, nginx:alpine, and any other base images.
+  # Monthly schedule because base image updates are less frequent and may
+  # require more testing due to potential breaking changes in OS packages.
+  # ---------------------------------------------------------------------------
+  - # The package ecosystem for Docker base images (monitors FROM directives)
+    package-ecosystem: "docker"
+    # Root directory -- Dependabot will scan all Dockerfiles in the repository
+    # It discovers Dockerfiles in all service subdirectories automatically
+    directory: "/"
+    # Check for updates monthly (less frequent than other ecosystems)
+    # Docker base image updates can include OS-level changes that need careful testing
+    schedule:
+      # Monthly checks balance staying current with minimizing disruption
+      interval: "monthly"
+    # Limit open PRs for Docker updates
+    open-pull-requests-limit: 5
+    # Labels for identification
+    labels:
+      - "dependencies"    # General dependency update label
+      - "docker"          # Identifies this as a Docker base image update
+      - "infrastructure"  # Identifies this as an infrastructure change
+    # Customize commit message format
+    commit-message:
+      # Prefix commits with "docker:" for clear identification
+      prefix: "docker"

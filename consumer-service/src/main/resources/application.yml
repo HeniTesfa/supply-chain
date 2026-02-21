@@ -1,0 +1,65 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: consumer-service
+  
+  # MongoDB Configuration
+  data:
+    mongodb:
+      uri: ${SPRING_DATA_MONGODB_URI:mongodb://localhost:27017/supply_chain_db}
+      auto-index-creation: true
+  
+  # Kafka Configuration
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: supply-chain-consumer-group
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "*"
+
+# Loader Service URL
+loader:
+  service:
+    url: http://localhost:8082
+
+# Management & Actuator
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    export:
+      # Datadog metrics export — enabled in staging/production via env vars
+      datadog:
+        api-key: ${DATADOG_API_KEY:}
+        uri: ${DATADOG_URI:https://api.datadoghq.com}
+        enabled: ${DATADOG_ENABLED:false}
+        step: 60s
+      # Dynatrace metrics export — enabled in staging/production via env vars
+      dynatrace:
+        uri: ${DYNATRACE_URI:}
+        api-token: ${DYNATRACE_API_TOKEN:}
+        enabled: ${DYNATRACE_ENABLED:false}
+        v2:
+          metric-key-prefix: supply_chain
+    tags:
+      service: ${spring.application.name}
+      environment: ${ENVIRONMENT:local}
+      version: ${APP_VERSION:1.0.0}
+
+# Logging
+logging:
+  level:
+    com.supplychain.consumer: DEBUG
+    org.springframework.kafka: INFO
+    org.springframework.data.mongodb: INFO

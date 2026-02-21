@@ -1,0 +1,111 @@
+# Server configuration section - defines the embedded web server (Tomcat) settings
+server:
+  # Sets the HTTP port to 8087 where this producer service will listen for incoming REST API requests
+  port: 8087
+
+# Spring framework configuration section - defines all Spring-related settings
+spring:
+  # Application identity configuration
+  application:
+    # Sets the application name to "producer-service", used in logging, actuator endpoints, and service discovery
+    name: producer-service
+
+  # MongoDB Configuration section - Spring Data MongoDB connection settings
+  data:
+    mongodb:
+      # MongoDB connection URI using Spring's property placeholder syntax with a default value
+      # ${SPRING_DATA_MONGODB_URI:...} means: use the SPRING_DATA_MONGODB_URI environment variable if set (used in Docker),
+      # otherwise fall back to mongodb://localhost:27017/supply_chain_db for local development
+      # Connects to the "supply_chain_db" database where the "produced_events" collection stores published event records
+      uri: ${SPRING_DATA_MONGODB_URI:mongodb://localhost:27017/supply_chain_db}
+      # Enables automatic creation of MongoDB indexes defined by @Indexed annotations on entity fields
+      # Without this, the indexes on eventId, idempotencyKey, contentHash, and publishedAt would not be created
+      auto-index-creation: true
+
+  # Kafka Producer Configuration section - Spring Kafka settings for the Kafka producer client
+  kafka:
+    # The Kafka broker address to connect to; in Docker, this is overridden by SPRING_KAFKA_BOOTSTRAP_SERVERS env var (kafka:9092)
+    bootstrap-servers: localhost:9092
+    # Producer-specific configuration settings
+    producer:
+      # Serializer for Kafka message keys; StringSerializer converts the String event ID key to bytes
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # Serializer for Kafka message values; JsonSerializer converts the Map<String, Object> event data to JSON bytes
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      # acks=all means the producer waits for acknowledgment from all in-sync replicas before considering a send successful
+      # This provides the strongest durability guarantee - the message will not be lost as long as at least one replica survives
+      acks: all                    # Wait for all replicas to acknowledge
+      # Number of times the producer will retry sending a message if the initial send fails (e.g., due to network issues)
+      retries: 3                   # Retry on failure
+      # Additional Kafka producer properties that do not have dedicated Spring Boot configuration keys
+      properties:
+        # Enables idempotent producer mode, which guarantees exactly-once delivery semantics
+        # The broker assigns a producer ID and sequence number to detect and discard duplicate messages
+        enable.idempotence: true   # Exactly-once semantics
+        # Maximum number of unacknowledged requests the producer will send per connection before blocking
+        # Set to 5 (the maximum allowed with idempotence enabled) to maintain message ordering while allowing pipelining
+        max.in.flight.requests.per.connection: 5
+        # Enables Snappy compression for Kafka messages, reducing network bandwidth and storage at the cost of slight CPU overhead
+        # Snappy provides a good balance between compression ratio and speed
+        compression.type: snappy   # Compress messages
+
+# Custom Kafka topic name configuration section - defines the topic names used by the producer service
+# These are application-level properties (not Spring Boot auto-configuration) referenced in KafkaProducerService
+kafka:
+  topics:
+    # Kafka topic for item events (processed by consumer-service and routed to item-service)
+    item: supply-chain.item.events
+    # Kafka topic for trade item events (processed by consumer-service and routed to trade-item-service)
+    trade-item: supply-chain.trade-item.events
+    # Kafka topic for supplier supply events (processed by consumer-service and routed to supplier-supply-service)
+    supplier-supply: supply-chain.supplier-supply.events
+    # Kafka topic for shipment tracking events (processed by consumer-service and routed to shipment-service)
+    shipment: supply-chain.shipment-tracking.events
+
+# Management and Actuator configuration section - Spring Boot Actuator settings for monitoring and health checks
+management:
+  # Configuration for which actuator endpoints are exposed over HTTP
+  endpoints:
+    web:
+      exposure:
+        # Exposes the health, info, metrics, and prometheus actuator endpoints via HTTP
+        # health: /actuator/health - shows application health status
+        # info: /actuator/info - shows application information
+        # metrics: /actuator/metrics - shows application metrics (memory, CPU, request counts)
+        # prometheus: /actuator/prometheus - exposes metrics in Prometheus scraping format
+        include: health,info,metrics,prometheus
+  # Individual endpoint configuration
+  endpoint:
+    health:
+      # show-details: always means the health endpoint will always display detailed health information
+      # including the status of MongoDB, Kafka, and disk space components
+      show-details: always
+  metrics:
+    export:
+      # Datadog metrics export — enabled in staging/production via env vars
+      datadog:
+        api-key: ${DATADOG_API_KEY:}
+        uri: ${DATADOG_URI:https://api.datadoghq.com}
+        enabled: ${DATADOG_ENABLED:false}
+        step: 60s
+      # Dynatrace metrics export — enabled in staging/production via env vars
+      dynatrace:
+        uri: ${DYNATRACE_URI:}
+        api-token: ${DYNATRACE_API_TOKEN:}
+        enabled: ${DYNATRACE_ENABLED:false}
+        v2:
+          metric-key-prefix: supply_chain
+    tags:
+      service: ${spring.application.name}
+      environment: ${ENVIRONMENT:local}
+      version: ${APP_VERSION:1.0.0}
+
+# Logging configuration section - controls log levels for different packages
+logging:
+  level:
+    # Sets DEBUG level for the producer service package, enabling detailed logging of event publishing and deduplication logic
+    com.supplychain.producer: DEBUG
+    # Sets INFO level for Spring Kafka classes, showing connection and producer lifecycle events but not verbose debug output
+    org.springframework.kafka: INFO
+    # Sets INFO level for Spring Data MongoDB classes, showing connection and query lifecycle events
+    org.springframework.data.mongodb: INFO

@@ -1,0 +1,537 @@
+# =============================================================================
+# Production Deployment Workflow - Deploy to AWS ECS Production Environment
+# =============================================================================
+# This workflow is MANUALLY triggered (workflow_dispatch) to deploy a specific
+# image tag to production. It requires explicit confirmation ("DEPLOY") to
+# prevent accidental deployments.
+#
+# The deployment follows a staged rollout order that respects service dependencies:
+#   1. Infrastructure (osp-mock-api) - foundational external API mock
+#   2. Downstream services (item, trade-item, supplier-supply, shipment) - in parallel
+#   3. Core services (consumer, loader, producer) - depend on downstream
+#   4. Frontends (producer-ui, monitoring-ui) - depend on core backend
+#
+# Prerequisites (configured as GitHub repository secrets):
+#   - AWS_ACCOUNT_ID: The 12-digit AWS account number
+#   - AWS_REGION: The AWS region (e.g., us-east-1)
+#   - AWS_IAM_ROLE_ARN: IAM role ARN for GitHub OIDC authentication
+#   - ECS_CLUSTER_PRODUCTION: Name of the ECS cluster for production
+# =============================================================================
+
+# Name displayed in the GitHub Actions UI for this workflow
+name: Deploy to Production
+
+# ---- Trigger Configuration ----
+# Only allow manual triggering via the GitHub Actions UI or API
+on:
+  workflow_dispatch:
+    # Define input parameters that the operator must provide when triggering
+    inputs:
+      # The Docker image tag to deploy (typically a Git commit SHA from staging)
+      image_tag:
+        # Description shown in the GitHub Actions trigger UI
+        description: 'Docker image tag to deploy (commit SHA from staging deployment)'
+        # This input must be provided -- the workflow will not run without it
+        required: true
+        # Input type is a free-form text string
+        type: string
+      # Safety confirmation input to prevent accidental production deployments
+      confirm_deploy:
+        # Description explaining what value to enter for confirmation
+        description: 'Type DEPLOY to confirm production deployment'
+        # This input must be provided
+        required: true
+        # Input type is a free-form text string
+        type: string
+
+# ---- Environment Variables ----
+# Global variables available to all jobs in this workflow
+env:
+  # The ECR registry URL constructed from AWS account secrets
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+  # The image tag provided by the operator when triggering the workflow
+  IMAGE_TAG: ${{ inputs.image_tag }}
+
+# ---- Concurrency Control ----
+# Prevent multiple production deployments from running at the same time
+concurrency:
+  # All production deployments share this concurrency group
+  group: deploy-production
+  # Do NOT cancel in-progress production deployments
+  # Unlike staging, we never want to interrupt a production rollout mid-deployment
+  cancel-in-progress: false
+
+# ---- Permissions ----
+permissions:
+  # Read access to check out the repository
+  contents: read
+  # Write access to request OIDC tokens for AWS authentication
+  id-token: write
+
+# ---- Job Definitions ----
+# Deployment order enforced by job dependencies:
+#   validate -> deploy-infrastructure -> deploy-downstream -> deploy-core -> deploy-frontends
+jobs:
+
+  # ===========================================================================
+  # Job 1: Validate Deployment Inputs
+  # ===========================================================================
+  # Safety gate that checks the operator typed "DEPLOY" as confirmation.
+  # This prevents accidental production deployments from mis-clicks or automation.
+  # All subsequent jobs depend on this passing.
+  # ===========================================================================
+  validate:
+    # Display name in the GitHub Actions UI
+    name: Validate Deployment Inputs
+    # Run on the latest Ubuntu runner
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Verify the confirmation input matches exactly "DEPLOY"
+      # If the operator typed anything else, the workflow stops here
+      - name: Check deployment confirmation
+        run: |
+          # Compare the confirm_deploy input against the expected value
+          if [ "${{ inputs.confirm_deploy }}" != "DEPLOY" ]; then
+            # Output an error annotation visible in the GitHub Actions UI
+            echo "::error::Deployment confirmation failed. You entered '${{ inputs.confirm_deploy }}' but expected 'DEPLOY'."
+            echo "Production deployment aborted. Please re-run and type DEPLOY to confirm."
+            # Exit with error code to fail this job and block all dependent jobs
+            exit 1
+          fi
+          # If we reach here, confirmation was successful
+          echo "Deployment confirmed. Deploying image tag: ${{ inputs.image_tag }}"
+
+      # Step 2: Verify the image tag is not empty and has a valid format
+      - name: Validate image tag format
+        run: |
+          # Check that the image tag was actually provided
+          if [ -z "${{ inputs.image_tag }}" ]; then
+            echo "::error::Image tag is empty. Please provide a valid commit SHA or tag."
+            exit 1
+          fi
+          # Log the image tag being deployed for audit trail
+          echo "Image tag to deploy: ${{ inputs.image_tag }}"
+          echo "All services will be updated to this image version."
+
+  # ===========================================================================
+  # Job 2: Deploy Infrastructure Services
+  # ===========================================================================
+  # Deploys the foundational infrastructure service (osp-mock-api) first.
+  # The item-service depends on osp-mock-api for OSP API calls with retry,
+  # so it must be running and healthy before downstream services start.
+  # ===========================================================================
+  deploy-infrastructure:
+    # Display name in the GitHub Actions UI
+    name: Deploy Infrastructure - osp-mock-api
+    # Run on the latest Ubuntu runner
+    runs-on: ubuntu-latest
+    # Only run after input validation passes
+    needs: validate
+    # Associate with the 'production' GitHub environment for protection rules
+    environment:
+      name: production
+      # URL for the production environment shown on the deployments page
+      url: https://supplychain.example.com
+
+    steps:
+      # Step 1: Check out the repository source code
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # Step 2: Configure AWS credentials using OIDC federation
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # Assume the IAM role configured for GitHub Actions OIDC
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          # Target the AWS region where production ECS cluster runs
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Step 3: Download the current task definition for osp-mock-api
+      # We modify only the image field, preserving all other configuration
+      - name: Download current ECS task definition
+        run: |
+          # Fetch the active task definition for production osp-mock-api
+          # Remove read-only fields that cannot be included in a new registration
+          aws ecs describe-task-definition \
+            --task-definition prod-supply-chain-osp-mock-api \
+            --query 'taskDefinition' \
+            | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
+            > task-definition.json
+
+      # Step 4: Update the container image in the task definition
+      - name: Update ECS task definition with new image
+        id: update-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          # Input task definition JSON from the download step
+          task-definition: task-definition.json
+          # Container name within the task definition
+          container-name: osp-mock-api
+          # New image URI with the operator-specified tag
+          image: ${{ env.ECR_REGISTRY }}/supply-chain-osp-mock-api:${{ env.IMAGE_TAG }}
+
+      # Step 5: Deploy the updated task definition to ECS production
+      - name: Deploy osp-mock-api to production ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          # The modified task definition from the render step
+          task-definition: ${{ steps.update-task-def.outputs.task-definition }}
+          # The ECS service name for production osp-mock-api
+          service: prod-supply-chain-osp-mock-api
+          # The production ECS cluster name from secrets
+          cluster: ${{ secrets.ECS_CLUSTER_PRODUCTION }}
+          # Wait for the deployment to complete and all tasks to be healthy
+          # This ensures osp-mock-api is ready before downstream services deploy
+          wait-for-service-stability: true
+
+      # Step 6: Verify the deployment reached a healthy state
+      - name: Verify osp-mock-api deployment
+        run: |
+          # Query ECS to confirm the deployment completed successfully
+          DEPLOYMENT_STATUS=$(aws ecs describe-services \
+            --cluster ${{ secrets.ECS_CLUSTER_PRODUCTION }} \
+            --services prod-supply-chain-osp-mock-api \
+            --query 'services[0].deployments[0].rolloutState' \
+            --output text)
+          echo "osp-mock-api deployment status: ${DEPLOYMENT_STATUS}"
+          # Fail if the deployment did not complete -- this blocks all dependent jobs
+          if [ "${DEPLOYMENT_STATUS}" != "COMPLETED" ]; then
+            echo "::error::osp-mock-api deployment failed. Status: ${DEPLOYMENT_STATUS}. Halting production rollout."
+            exit 1
+          fi
+
+  # ===========================================================================
+  # Job 3: Deploy Downstream Services (Parallel)
+  # ===========================================================================
+  # Deploys the four domain-specific processing services in parallel:
+  #   - item-service (processes items, calls osp-mock-api)
+  #   - trade-item-service (manages GTINs and suppliers)
+  #   - supplier-supply-service (tracks supplier levels)
+  #   - shipment-service (tracks shipments)
+  #
+  # These services receive events from loader-service and must be running
+  # before core services (consumer, loader, producer) are deployed.
+  # They depend on osp-mock-api being available (deploy-infrastructure).
+  # ===========================================================================
+  deploy-downstream:
+    # Display name includes the service name from the matrix
+    name: Deploy Downstream - ${{ matrix.service }}
+    # Run on the latest Ubuntu runner
+    runs-on: ubuntu-latest
+    # Only run after infrastructure (osp-mock-api) is deployed and healthy
+    needs: deploy-infrastructure
+    # Associate with the 'production' environment
+    environment:
+      name: production
+      url: https://supplychain.example.com
+
+    # ---- Matrix Strategy ----
+    # Deploy all four downstream services in parallel
+    strategy:
+      # Do not cancel other services if one fails
+      # Each service is independent so we want to see all results
+      fail-fast: false
+      matrix:
+        # The four domain-specific services that process events from loader-service
+        service:
+          - item-service            # Processes items, calls OSP API with exponential backoff
+          - trade-item-service      # Manages GTIN codes and supplier associations
+          - supplier-supply-service # Tracks supplier inventory levels
+          - shipment-service        # Tracks shipment status and delivery
+
+    steps:
+      # Step 1: Check out repository source code
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # Step 2: Configure AWS credentials using OIDC
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Step 3: Download the current ECS task definition for this service
+      - name: Download current ECS task definition
+        run: |
+          # Fetch the active task definition for this production service
+          # The naming convention is: prod-supply-chain-<service-name>
+          aws ecs describe-task-definition \
+            --task-definition prod-supply-chain-${{ matrix.service }} \
+            --query 'taskDefinition' \
+            | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
+            > task-definition.json
+
+      # Step 4: Update the container image to the new version
+      - name: Update ECS task definition with new image
+        id: update-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          # Container name matches the service name in the ECS task
+          container-name: ${{ matrix.service }}
+          # New image URI with the operator-provided tag
+          image: ${{ env.ECR_REGISTRY }}/supply-chain-${{ matrix.service }}:${{ env.IMAGE_TAG }}
+
+      # Step 5: Deploy to ECS production and wait for stability
+      - name: Deploy ${{ matrix.service }} to production ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.update-task-def.outputs.task-definition }}
+          # ECS service name follows the production naming convention
+          service: prod-supply-chain-${{ matrix.service }}
+          cluster: ${{ secrets.ECS_CLUSTER_PRODUCTION }}
+          # Wait for the service to stabilize before marking the job as successful
+          # This ensures the service is healthy before core services are deployed
+          wait-for-service-stability: true
+
+      # Step 6: Verify deployment status
+      - name: Verify ${{ matrix.service }} deployment
+        run: |
+          DEPLOYMENT_STATUS=$(aws ecs describe-services \
+            --cluster ${{ secrets.ECS_CLUSTER_PRODUCTION }} \
+            --services prod-supply-chain-${{ matrix.service }} \
+            --query 'services[0].deployments[0].rolloutState' \
+            --output text)
+          echo "${{ matrix.service }} deployment status: ${DEPLOYMENT_STATUS}"
+          if [ "${DEPLOYMENT_STATUS}" != "COMPLETED" ]; then
+            echo "::error::${{ matrix.service }} deployment failed. Status: ${DEPLOYMENT_STATUS}"
+            exit 1
+          fi
+
+  # ===========================================================================
+  # Job 4: Deploy Core Services
+  # ===========================================================================
+  # Deploys the three core event-processing services:
+  #   - consumer-service (Kafka consumer with 4-level deduplication)
+  #   - loader-service (routes events to downstream services)
+  #   - producer-service (REST API that publishes events to Kafka)
+  #
+  # These services depend on downstream services being available because:
+  #   - loader-service routes events to item/trade-item/supplier-supply/shipment
+  #   - consumer-service forwards events to loader-service
+  #   - producer-service publishes events consumed by consumer-service
+  # ===========================================================================
+  deploy-core:
+    # Display name includes the service name from the matrix
+    name: Deploy Core - ${{ matrix.service }}
+    # Run on the latest Ubuntu runner
+    runs-on: ubuntu-latest
+    # Only run after ALL downstream services are deployed and healthy
+    needs: deploy-downstream
+    # Associate with the 'production' environment
+    environment:
+      name: production
+      url: https://supplychain.example.com
+
+    # ---- Matrix Strategy ----
+    # Deploy all three core services in parallel
+    strategy:
+      # Do not cancel other services if one fails
+      fail-fast: false
+      matrix:
+        # The three core services that form the event processing pipeline
+        service:
+          - consumer-service  # Consumes from Kafka, deduplicates, forwards to loader
+          - loader-service    # Routes events by type to downstream services
+          - producer-service  # REST API -> Kafka publisher with idempotency
+
+    steps:
+      # Step 1: Check out repository source code
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # Step 2: Configure AWS credentials using OIDC federation
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Step 3: Download the current task definition from ECS
+      - name: Download current ECS task definition
+        run: |
+          # Fetch the active production task definition for this core service
+          aws ecs describe-task-definition \
+            --task-definition prod-supply-chain-${{ matrix.service }} \
+            --query 'taskDefinition' \
+            | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
+            > task-definition.json
+
+      # Step 4: Render the new image into the task definition
+      - name: Update ECS task definition with new image
+        id: update-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ matrix.service }}
+          image: ${{ env.ECR_REGISTRY }}/supply-chain-${{ matrix.service }}:${{ env.IMAGE_TAG }}
+
+      # Step 5: Deploy the updated task definition to production ECS
+      - name: Deploy ${{ matrix.service }} to production ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.update-task-def.outputs.task-definition }}
+          service: prod-supply-chain-${{ matrix.service }}
+          cluster: ${{ secrets.ECS_CLUSTER_PRODUCTION }}
+          # Wait for stability to ensure core services are healthy before frontends deploy
+          wait-for-service-stability: true
+
+      # Step 6: Verify the deployment completed successfully
+      - name: Verify ${{ matrix.service }} deployment
+        run: |
+          DEPLOYMENT_STATUS=$(aws ecs describe-services \
+            --cluster ${{ secrets.ECS_CLUSTER_PRODUCTION }} \
+            --services prod-supply-chain-${{ matrix.service }} \
+            --query 'services[0].deployments[0].rolloutState' \
+            --output text)
+          echo "${{ matrix.service }} deployment status: ${DEPLOYMENT_STATUS}"
+          if [ "${DEPLOYMENT_STATUS}" != "COMPLETED" ]; then
+            echo "::error::${{ matrix.service }} deployment failed. Status: ${DEPLOYMENT_STATUS}"
+            exit 1
+          fi
+
+  # ===========================================================================
+  # Job 5: Deploy Frontend Applications
+  # ===========================================================================
+  # Deploys the two React frontend applications as the final step:
+  #   - producer-ui (port 3000) - event creation form, depends on producer-service
+  #   - monitoring-ui (port 3001) - error dashboard, depends on consumer-service
+  #
+  # Frontends are deployed last because they depend on the backend APIs being
+  # available. If a frontend deployed first, users would see errors trying to
+  # reach APIs that haven't been updated yet.
+  # ===========================================================================
+  deploy-frontends:
+    # Display name includes the service name from the matrix
+    name: Deploy Frontend - ${{ matrix.service }}
+    # Run on the latest Ubuntu runner
+    runs-on: ubuntu-latest
+    # Only run after ALL core services are deployed and healthy
+    needs: deploy-core
+    # Associate with the 'production' environment
+    environment:
+      name: production
+      url: https://supplychain.example.com
+
+    # ---- Matrix Strategy ----
+    # Deploy both frontends in parallel
+    strategy:
+      # Do not cancel the other frontend if one fails
+      fail-fast: false
+      matrix:
+        # The two React frontend applications
+        service:
+          - producer-ui   # Event creation form (port 3000), calls producer-service
+          - monitoring-ui # Error monitoring dashboard (port 3001), reads from consumer-service
+
+    steps:
+      # Step 1: Check out repository source code
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # Step 2: Configure AWS credentials using OIDC federation
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Step 3: Download the current task definition for this frontend service
+      - name: Download current ECS task definition
+        run: |
+          # Fetch the active production task definition for this frontend
+          aws ecs describe-task-definition \
+            --task-definition prod-supply-chain-${{ matrix.service }} \
+            --query 'taskDefinition' \
+            | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
+            > task-definition.json
+
+      # Step 4: Render the new image URI into the task definition
+      - name: Update ECS task definition with new image
+        id: update-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ matrix.service }}
+          image: ${{ env.ECR_REGISTRY }}/supply-chain-${{ matrix.service }}:${{ env.IMAGE_TAG }}
+
+      # Step 5: Deploy the updated task definition to production ECS
+      - name: Deploy ${{ matrix.service }} to production ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.update-task-def.outputs.task-definition }}
+          service: prod-supply-chain-${{ matrix.service }}
+          cluster: ${{ secrets.ECS_CLUSTER_PRODUCTION }}
+          # Wait for stability to confirm the frontend is serving traffic
+          wait-for-service-stability: true
+
+      # Step 6: Verify the frontend deployment completed
+      - name: Verify ${{ matrix.service }} deployment
+        run: |
+          DEPLOYMENT_STATUS=$(aws ecs describe-services \
+            --cluster ${{ secrets.ECS_CLUSTER_PRODUCTION }} \
+            --services prod-supply-chain-${{ matrix.service }} \
+            --query 'services[0].deployments[0].rolloutState' \
+            --output text)
+          echo "${{ matrix.service }} deployment status: ${DEPLOYMENT_STATUS}"
+          if [ "${DEPLOYMENT_STATUS}" != "COMPLETED" ]; then
+            echo "::error::${{ matrix.service }} deployment failed. Status: ${DEPLOYMENT_STATUS}"
+            exit 1
+          fi
+
+  # ===========================================================================
+  # Job 6: Post-Deployment Notification
+  # ===========================================================================
+  # Runs after all deployment stages complete (success or failure).
+  # Outputs a summary of the entire production deployment for audit purposes.
+  # ===========================================================================
+  post-deploy-summary:
+    # Display name in the GitHub Actions UI
+    name: Post-Deployment Summary
+    # Run on the latest Ubuntu runner
+    runs-on: ubuntu-latest
+    # Run after all deployment jobs, regardless of success or failure
+    needs:
+      - deploy-infrastructure
+      - deploy-downstream
+      - deploy-core
+      - deploy-frontends
+    # Always run this job, even if previous jobs failed
+    # This ensures we always get a deployment summary
+    if: always()
+
+    steps:
+      # Step 1: Output a deployment summary with results from all stages
+      - name: Generate deployment summary
+        run: |
+          # Print a formatted summary of the production deployment
+          echo "============================================="
+          echo "  PRODUCTION DEPLOYMENT SUMMARY"
+          echo "============================================="
+          echo "Image Tag:      ${{ inputs.image_tag }}"
+          echo "Triggered By:   ${{ github.actor }}"
+          echo "Workflow Run:   ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "Timestamp:      $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "---------------------------------------------"
+          echo "Stage Results:"
+          echo "  Infrastructure (osp-mock-api): ${{ needs.deploy-infrastructure.result }}"
+          echo "  Downstream (item, trade-item, supplier-supply, shipment): ${{ needs.deploy-downstream.result }}"
+          echo "  Core (consumer, loader, producer): ${{ needs.deploy-core.result }}"
+          echo "  Frontends (producer-ui, monitoring-ui): ${{ needs.deploy-frontends.result }}"
+          echo "============================================="
+
+      # Step 2: Fail the summary job if any deployment stage failed
+      # This makes the overall workflow status reflect any partial failures
+      - name: Check for deployment failures
+        if: |
+          needs.deploy-infrastructure.result == 'failure' ||
+          needs.deploy-downstream.result == 'failure' ||
+          needs.deploy-core.result == 'failure' ||
+          needs.deploy-frontends.result == 'failure'
+        run: |
+          echo "::error::One or more deployment stages failed. Review the summary above."
+          echo "Manual intervention may be required to rollback failed services."
+          exit 1

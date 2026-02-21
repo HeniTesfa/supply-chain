@@ -1,0 +1,56 @@
+# Server configuration section: defines the embedded web server settings for the supplier supply service
+server:
+  # Sets the HTTP port to 8085, which is the designated port for the supplier-supply-service in the microservices architecture
+  port: 8085
+
+# Spring framework configuration section: defines core Spring application properties
+spring:
+  # Application identity configuration subsection
+  application:
+    # Sets the application name to "supplier-supply-service", used for service discovery, logging, and actuator identification
+    name: supplier-supply-service
+
+# Management & Actuator configuration section: configures Spring Boot Actuator endpoints for monitoring and observability
+management:
+  # Endpoints configuration subsection: controls which actuator endpoints are available
+  endpoints:
+    # Web-specific endpoint exposure settings (HTTP-accessible endpoints)
+    web:
+      # Exposure configuration: determines which endpoints are accessible via HTTP
+      exposure:
+        # Includes only the health, info, and metrics actuator endpoints, restricting access to sensitive endpoints
+        include: health,info,metrics
+  # Individual endpoint configuration subsection
+  endpoint:
+    # Health endpoint specific settings
+    health:
+      # Configures the health endpoint to always show full details including disk space, ping, and custom health indicators
+      show-details: always
+  metrics:
+    export:
+      # Datadog metrics export — enabled in staging/production via env vars
+      datadog:
+        api-key: ${DATADOG_API_KEY:}
+        uri: ${DATADOG_URI:https://api.datadoghq.com}
+        enabled: ${DATADOG_ENABLED:false}
+        step: 60s
+      # Dynatrace metrics export — enabled in staging/production via env vars
+      dynatrace:
+        uri: ${DYNATRACE_URI:}
+        api-token: ${DYNATRACE_API_TOKEN:}
+        enabled: ${DYNATRACE_ENABLED:false}
+        v2:
+          metric-key-prefix: supply_chain
+    tags:
+      service: ${spring.application.name}
+      environment: ${ENVIRONMENT:local}
+      version: ${APP_VERSION:1.0.0}
+
+# Logging configuration section: controls log verbosity for different packages
+logging:
+  # Log level settings per package
+  level:
+    # Sets the supplier supply service package to DEBUG level for detailed diagnostic logging during development
+    com.supplychain.suppliersupply: DEBUG
+    # Sets the Spring Web framework package to INFO level to reduce verbose framework-level logging
+    org.springframework.web: INFO

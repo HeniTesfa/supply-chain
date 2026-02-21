@@ -1,0 +1,77 @@
+# Server configuration section - defines the embedded web server (Tomcat) settings
+server:
+  # Sets the HTTP port to 8083 where the item service will listen for incoming item processing requests
+  # The loader-service forwards item events to http://localhost:8083/api/process
+  port: 8083
+
+# Spring framework configuration section
+spring:
+  # Application identity configuration
+  application:
+    # Sets the application name to "item-service", used in logging, actuator endpoints, and service identification
+    name: item-service
+
+# OSP (Order Service Provider) API Configuration section - custom application properties for the external API integration
+# These properties are injected into ItemProcessingService via @Value annotations
+osp:
+  api:
+    # Base URL of the external OSP API; in local development this points to the osp-mock-api running on port 9000
+    # In Docker, this is overridden by the OSP_API_URL environment variable to point to the containerized mock API
+    url: http://localhost:9000
+    # Retry configuration for the OSP API calls
+    retry:
+      # Maximum number of retry attempts before giving up and throwing an exception
+      # The service will attempt the API call up to 3 times with exponential backoff between each attempt
+      max-attempts: 3          # Retry up to 3 times
+      # The multiplier used in the exponential backoff formula: wait = 2^attempt * 1000ms
+      # Attempt 1 waits 2s, attempt 2 waits 4s, attempt 3 waits 8s
+      # Note: This value is defined here for documentation but the actual backoff calculation in
+      # ItemProcessingService uses Math.pow(2, attempt) * 1000 directly
+      backoff-multiplier: 2    # Exponential backoff (2s, 4s, 8s)
+
+# Management and Actuator configuration section - Spring Boot Actuator settings for monitoring and health checks
+management:
+  # Configuration for which actuator endpoints are exposed over HTTP
+  endpoints:
+    web:
+      exposure:
+        # Exposes the health, info, and metrics actuator endpoints via HTTP
+        # health: /actuator/health - shows application health status
+        # info: /actuator/info - shows application information
+        # metrics: /actuator/metrics - shows application metrics (request counts, response times, JVM stats)
+        include: health,info,metrics
+  # Individual endpoint configuration
+  endpoint:
+    health:
+      # show-details: always means the health endpoint will always display detailed health information
+      # including the status of dependent services and system resources
+      show-details: always
+  metrics:
+    export:
+      # Datadog metrics export — enabled in staging/production via env vars
+      datadog:
+        api-key: ${DATADOG_API_KEY:}
+        uri: ${DATADOG_URI:https://api.datadoghq.com}
+        enabled: ${DATADOG_ENABLED:false}
+        step: 60s
+      # Dynatrace metrics export — enabled in staging/production via env vars
+      dynatrace:
+        uri: ${DYNATRACE_URI:}
+        api-token: ${DYNATRACE_API_TOKEN:}
+        enabled: ${DYNATRACE_ENABLED:false}
+        v2:
+          metric-key-prefix: supply_chain
+    tags:
+      service: ${spring.application.name}
+      environment: ${ENVIRONMENT:local}
+      version: ${APP_VERSION:1.0.0}
+
+# Logging configuration section - controls log levels for different packages
+logging:
+  level:
+    # Sets DEBUG level for the item service package, enabling detailed logging of item processing,
+    # validation, OSP API calls, and retry logic
+    com.supplychain.item: DEBUG
+    # Sets INFO level for Spring Web classes, showing HTTP request/response lifecycle events
+    # but suppressing verbose debug-level output from the web framework
+    org.springframework.web: INFO

@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Logback configuration for consumer-service.
+
+  Profiles:
+    staging, production  → JSON output via logstash-logback-encoder
+                           (structured logs ingested by Datadog Log Management)
+    all other profiles   → human-readable plain-text output for local dev
+
+  The JSON format emits the standard Datadog reserved attributes:
+    - "service"      maps to Datadog's service facet
+    - "env"          maps to Datadog's environment facet
+    - "dd.trace_id"  (automatically populated if dd-java-agent is attached)
+-->
+<configuration>
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <!-- Pull values from Spring Environment -->
+    <springProperty scope="context" name="appName"     source="spring.application.name"    defaultValue="consumer-service"/>
+    <springProperty scope="context" name="appEnv"      source="management.metrics.tags.environment" defaultValue="local"/>
+    <springProperty scope="context" name="appVersion"  source="management.metrics.tags.version"     defaultValue="1.0.0"/>
+
+    <!-- ================================================================== -->
+    <!-- JSON Appender — for staging and production                          -->
+    <!-- Outputs one JSON object per log line; consumed by Datadog agent     -->
+    <!-- ================================================================== -->
+    <appender name="JSON_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <!-- Datadog reserved attributes -->
+            <customFields>{"service":"${appName}","env":"${appEnv}","version":"${appVersion}"}</customFields>
+            <!-- Rename logback fields to standard names recognised by Datadog -->
+            <fieldNames>
+                <timestamp>timestamp</timestamp>
+                <message>message</message>
+                <logger>logger</logger>
+                <thread>thread</thread>
+                <level>level</level>
+                <levelValue>[ignore]</levelValue>
+            </fieldNames>
+            <!-- Include MDC entries (e.g. traceId injected by Micrometer Tracing) -->
+            <includeMdcKeyName>dd.trace_id</includeMdcKeyName>
+            <includeMdcKeyName>dd.span_id</includeMdcKeyName>
+            <!-- Shorten stack traces to keep log volume manageable -->
+            <throwableConverter class="net.logstash.logback.stacktrace.ShortenedThrowableConverter">
+                <maxDepthPerCause>20</maxDepthPerCause>
+                <shortenedClassNameLength>20</shortenedClassNameLength>
+                <rootCauseFirst>true</rootCauseFirst>
+            </throwableConverter>
+        </encoder>
+    </appender>
+
+    <!-- ================================================================== -->
+    <!-- Plain-text Appender — for local development                         -->
+    <!-- ================================================================== -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Use JSON in staging/production, plain text everywhere else -->
+    <springProfile name="staging,production">
+        <root level="INFO">
+            <appender-ref ref="JSON_CONSOLE"/>
+        </root>
+    </springProfile>
+
+    <springProfile name="!staging&amp;!production">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+    </springProfile>
+</configuration>

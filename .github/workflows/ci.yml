@@ -1,0 +1,298 @@
+# =============================================================================
+# CI Workflow - Continuous Integration for Supply Chain Microservices
+# =============================================================================
+# This workflow validates every code change by compiling backend services,
+# building frontend applications, and verifying Docker images build correctly.
+# It runs on every push and pull request targeting main or develop branches.
+# =============================================================================
+
+# Name displayed in the GitHub Actions UI for this workflow
+name: CI - Build & Test
+
+# ---- Trigger Configuration ----
+# Define which Git events will trigger this workflow to run
+on:
+  # Trigger on every push to main or develop branches
+  push:
+    # Only run when commits are pushed to these long-lived branches
+    branches:
+      - main       # Production-ready code
+      - develop    # Integration branch for feature work
+  # Trigger on pull requests targeting main or develop branches
+  pull_request:
+    # Only run when PRs are opened/updated against these branches
+    branches:
+      - main       # PRs going into production
+      - develop    # PRs going into integration
+
+# ---- Concurrency Control ----
+# Prevent duplicate workflow runs for the same branch/PR
+concurrency:
+  # Group runs by workflow name + branch (or PR number for pull_request events)
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel any currently running workflow in the same group when a new one starts
+  # This saves CI minutes when multiple commits are pushed in quick succession
+  cancel-in-progress: true
+
+# ---- Job Definitions ----
+jobs:
+
+  # ===========================================================================
+  # Job 1: Backend Build & Test
+  # ===========================================================================
+  # Compiles all 8 Java Spring Boot microservices using the Maven multi-module
+  # parent POM and runs any unit/integration tests via `mvn clean verify`.
+  # The verify phase includes compile, test, and package validation.
+  # ===========================================================================
+  backend-build:
+    # Display name shown in the GitHub Actions UI for this job
+    name: Backend - Build & Test
+    # Run on the latest Ubuntu runner provided by GitHub
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Check out the repository source code into the runner
+      # This clones the full repository so Maven can access all 8 service modules
+      - name: Checkout source code
+        uses: actions/checkout@v4  # Official GitHub action for git checkout
+
+      # Step 2: Set up Java Development Kit (JDK) 17 using Eclipse Temurin distribution
+      # Temurin is the Eclipse Foundation's free, production-ready OpenJDK build
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4  # Official GitHub action for Java setup
+        with:
+          # Use Java 17 to match the project's maven.compiler.source/target settings
+          java-version: '17'
+          # Temurin is a well-maintained, TCK-certified OpenJDK distribution
+          distribution: 'temurin'
+          # Enable GitHub Actions Maven cache to speed up dependency downloads
+          # Caches ~/.m2/repository based on a hash of all pom.xml files
+          cache: 'maven'
+
+      # Step 3: Compile all services and run tests using Maven
+      # mvn clean verify does: clean -> compile -> test -> package -> verify
+      # The -B flag runs Maven in batch (non-interactive) mode for CI environments
+      # This uses the root pom.xml which includes all 8 service modules
+      - name: Build and test with Maven
+        run: mvn clean verify -B
+        # Note: unlike production Docker builds, we do NOT skip tests here
+        # because the whole point of CI is to catch test failures early
+
+      # Step 4: Upload test results as workflow artifacts for debugging failures
+      # Even if tests pass, having the reports available aids troubleshooting
+      - name: Upload test results
+        # Run this step even if the Maven build/test step fails
+        # This ensures we can download and inspect test reports after failures
+        if: always()
+        uses: actions/upload-artifact@v4  # Official GitHub action for artifact upload
+        with:
+          # Name for the uploaded artifact bundle in the Actions UI
+          name: backend-test-results
+          # Glob pattern to capture Surefire (unit) and Failsafe (integration) reports
+          # Each service module generates its own reports under target/surefire-reports/
+          path: |
+            **/target/surefire-reports/*.xml
+            **/target/failsafe-reports/*.xml
+          # Keep test report artifacts for 7 days to save storage
+          retention-days: 7
+
+  # ===========================================================================
+  # Job 2: Frontend - Producer UI Build
+  # ===========================================================================
+  # Builds the React Producer UI application (port 3000).
+  # This is the event creation form that sends events to producer-service.
+  # Uses Node.js 18 and npm ci for reproducible, clean installs.
+  # ===========================================================================
+  frontend-producer-ui:
+    # Display name shown in the GitHub Actions UI
+    name: Frontend - Producer UI Build
+    # Run on the latest Ubuntu runner
+    runs-on: ubuntu-latest
+
+    # Set the default working directory for all run steps in this job
+    # This avoids repeating `cd producer-ui` in every step
+    defaults:
+      run:
+        # All shell commands in this job execute from the producer-ui/ directory
+        working-directory: producer-ui
+
+    steps:
+      # Step 1: Check out the repository source code
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Node.js 18 runtime environment
+      # Node 18 is the LTS version matching the Dockerfile's node:18-alpine base image
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4  # Official GitHub action for Node.js setup
+        with:
+          # Use Node.js 18 to match the production Dockerfile environment
+          node-version: '18'
+          # Enable npm dependency caching based on the package-lock.json hash
+          # This dramatically speeds up subsequent runs by reusing cached node_modules
+          cache: 'npm'
+          # Point the cache to the producer-ui directory where package-lock.json lives
+          cache-dependency-path: producer-ui/package-lock.json
+
+      # Step 3: Install dependencies using npm ci (clean install)
+      # npm ci is preferred over npm install in CI because it:
+      #   1. Deletes node_modules/ first for a clean slate
+      #   2. Installs exact versions from package-lock.json (no version range resolution)
+      #   3. Fails if package-lock.json is out of sync with package.json
+      # This guarantees reproducible builds across all environments
+      - name: Install dependencies
+        run: npm ci
+
+      # Step 4: Build the production React application
+      # Creates an optimized, minified bundle in the build/ directory
+      # The build output is what gets served by nginx in the Docker container
+      - name: Build Producer UI
+        run: npm run build
+        # Set CI=true so React's build script treats warnings as errors
+        # This catches potential issues that would be silently ignored in dev mode
+        env:
+          CI: true  # Treat React build warnings as errors in CI
+
+      # Step 5: Upload the build output as an artifact
+      # This can be used by downstream deployment jobs or for manual inspection
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          # Descriptive name for the artifact in the Actions UI
+          name: producer-ui-build
+          # Upload the entire build directory containing the optimized React app
+          path: producer-ui/build
+          # Keep build artifacts for 7 days
+          retention-days: 7
+
+  # ===========================================================================
+  # Job 3: Frontend - Monitoring UI Build
+  # ===========================================================================
+  # Builds the React Monitoring UI dashboard (port 3001).
+  # This dashboard displays error logs from the consumer-service using Recharts.
+  # Uses the same Node.js 18 + npm ci pattern as the Producer UI job.
+  # ===========================================================================
+  frontend-monitoring-ui:
+    # Display name shown in the GitHub Actions UI
+    name: Frontend - Monitoring UI Build
+    # Run on the latest Ubuntu runner
+    runs-on: ubuntu-latest
+
+    # Set the default working directory for all run steps in this job
+    defaults:
+      run:
+        # All shell commands in this job execute from the monitoring-ui/ directory
+        working-directory: monitoring-ui
+
+    steps:
+      # Step 1: Check out the repository source code
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Node.js 18 runtime environment
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          # Use Node.js 18 LTS to match the Dockerfile base image
+          node-version: '18'
+          # Enable npm dependency caching for faster CI runs
+          cache: 'npm'
+          # Point the cache to the monitoring-ui directory's package-lock.json
+          cache-dependency-path: monitoring-ui/package-lock.json
+
+      # Step 3: Clean install of dependencies from package-lock.json
+      - name: Install dependencies
+        run: npm ci
+
+      # Step 4: Build the production React application
+      - name: Build Monitoring UI
+        run: npm run build
+        env:
+          # Treat warnings as errors during the React build process
+          CI: true
+
+      # Step 5: Upload the build output as a workflow artifact
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          # Descriptive name for the artifact bundle
+          name: monitoring-ui-build
+          # Upload the optimized build directory
+          path: monitoring-ui/build
+          # Keep build artifacts for 7 days to save storage
+          retention-days: 7
+
+  # ===========================================================================
+  # Job 4: Docker Build Verification
+  # ===========================================================================
+  # Uses a matrix strategy to build Docker images for all 10 services in parallel.
+  # Images are built but NOT pushed to any registry -- this job only verifies
+  # that every Dockerfile builds successfully with the current code.
+  # This catches Dockerfile syntax errors, missing files, and build failures
+  # before they reach the deployment pipeline.
+  # ===========================================================================
+  docker-build-check:
+    # Display name includes the matrix variable to show which service is building
+    name: Docker Build - ${{ matrix.service }}
+    # Run on the latest Ubuntu runner
+    runs-on: ubuntu-latest
+    # Only run Docker builds after the backend and frontend jobs pass
+    # This avoids wasting time building Docker images if the code doesn't compile
+    needs:
+      - backend-build          # Wait for Java compilation and tests to pass
+      - frontend-producer-ui   # Wait for Producer UI build to pass
+      - frontend-monitoring-ui # Wait for Monitoring UI build to pass
+
+    # ---- Matrix Strategy ----
+    # Run this job once for each service listed in the matrix
+    # GitHub Actions will create 10 parallel jobs, one per service
+    strategy:
+      # Do not cancel other service builds if one fails
+      # This lets us see ALL failures at once instead of just the first one
+      fail-fast: false
+      matrix:
+        # List of all 10 services that have Dockerfiles
+        # Includes 8 Java backend services and 2 React frontend applications
+        service:
+          - consumer-service        # Kafka consumer with 4-level deduplication (port 8081)
+          - loader-service          # Event router to downstream services (port 8082)
+          - item-service            # Item processing with OSP API retry (port 8083)
+          - trade-item-service      # GTIN/supplier management (port 8084)
+          - supplier-supply-service # Supplier level tracking (port 8085)
+          - shipment-service        # Shipment tracking (port 8086)
+          - producer-service        # REST API for event creation (port 8087)
+          - osp-mock-api            # Mock external OSP API (port 9000)
+          - producer-ui             # React event creation form (port 3000)
+          - monitoring-ui           # React error monitoring dashboard (port 3001)
+
+    steps:
+      # Step 1: Check out the repository source code
+      # Full checkout is needed because all Dockerfiles use the root as build context
+      # (e.g., they COPY pom.xml from root and multiple service directories)
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Docker Buildx for enhanced build capabilities
+      # Buildx provides build caching, multi-platform support, and better performance
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3  # Official Docker action for Buildx setup
+
+      # Step 3: Build the Docker image for this matrix service
+      # Uses docker/build-push-action which integrates with Buildx for caching
+      - name: Build Docker image for ${{ matrix.service }}
+        uses: docker/build-push-action@v6  # Official Docker build and push action
+        with:
+          # Use the repository root as the Docker build context
+          # This matches docker-compose.yml which sets context: . for all services
+          context: .
+          # Path to the Dockerfile, located inside each service's directory
+          file: ./${{ matrix.service }}/Dockerfile
+          # Do NOT push the image to any registry -- this is a build verification only
+          push: false
+          # Tag the image with the service name and commit SHA for identification
+          # This tag is only used locally on the runner and discarded after the job
+          tags: supply-chain-${{ matrix.service }}:${{ github.sha }}
+          # Enable GitHub Actions build cache to speed up repeated Docker builds
+          # type=gha uses GitHub's built-in cache storage for Docker layers
+          cache-from: type=gha  # Pull cached layers from GitHub Actions cache
+          cache-to: type=gha,mode=max  # Push all layers to cache (mode=max caches all layers)

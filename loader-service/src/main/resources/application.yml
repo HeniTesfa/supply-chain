@@ -1,0 +1,77 @@
+# Server configuration section - defines the embedded web server (Tomcat) settings
+server:
+  # Sets the HTTP port to 8082 where the loader service will listen for incoming event routing requests
+  port: 8082
+
+# Spring framework configuration section
+spring:
+  # Application identity configuration
+  application:
+    # Sets the application name to "loader-service", used in logging, actuator endpoints, and service identification
+    name: loader-service
+
+# Downstream service URLs section - custom application properties defining the base URLs of the four downstream processing services
+# These URLs are injected into LoaderService via @Value annotations
+# In Docker, these are overridden by environment variables (e.g., SERVICES_ITEM_SERVICE_URL=http://item-service:8083)
+services:
+  # Item service configuration - processes item events and integrates with the external OSP API
+  item-service:
+    # Base URL of the item-service; /api/process is appended at runtime when routing events
+    url: http://localhost:8083
+  # Trade item service configuration - manages GTIN (Global Trade Item Number) and supplier relationships
+  trade-item-service:
+    # Base URL of the trade-item-service; /api/process is appended at runtime when routing events
+    url: http://localhost:8084
+  # Supplier supply service configuration - tracks supplier-level inventory and supply events
+  supplier-supply-service:
+    # Base URL of the supplier-supply-service; /api/process is appended at runtime when routing events
+    url: http://localhost:8085
+  # Shipment service configuration - tracks shipment status, carriers, and delivery tracking
+  shipment-service:
+    # Base URL of the shipment-service; /api/process is appended at runtime when routing events
+    url: http://localhost:8086
+
+# Management and Actuator configuration section - Spring Boot Actuator settings for monitoring and health checks
+management:
+  # Configuration for which actuator endpoints are exposed over HTTP
+  endpoints:
+    web:
+      exposure:
+        # Exposes the health, info, and metrics actuator endpoints via HTTP
+        # health: /actuator/health - shows application health status
+        # info: /actuator/info - shows application information
+        # metrics: /actuator/metrics - shows application metrics (request counts, response times, etc.)
+        include: health,info,metrics
+  # Individual endpoint configuration
+  endpoint:
+    health:
+      # show-details: always means the health endpoint will always display detailed health information
+      # including the status of downstream service connectivity
+      show-details: always
+  metrics:
+    export:
+      # Datadog metrics export — enabled in staging/production via env vars
+      datadog:
+        api-key: ${DATADOG_API_KEY:}
+        uri: ${DATADOG_URI:https://api.datadoghq.com}
+        enabled: ${DATADOG_ENABLED:false}
+        step: 60s
+      # Dynatrace metrics export — enabled in staging/production via env vars
+      dynatrace:
+        uri: ${DYNATRACE_URI:}
+        api-token: ${DYNATRACE_API_TOKEN:}
+        enabled: ${DYNATRACE_ENABLED:false}
+        v2:
+          metric-key-prefix: supply_chain
+    tags:
+      service: ${spring.application.name}
+      environment: ${ENVIRONMENT:local}
+      version: ${APP_VERSION:1.0.0}
+
+# Logging configuration section - controls log levels for different packages
+logging:
+  level:
+    # Sets DEBUG level for the loader service package, enabling detailed logging of routing decisions and event forwarding
+    com.supplychain.loader: DEBUG
+    # Sets INFO level for Spring Web classes, showing HTTP request/response lifecycle events but not verbose debug output
+    org.springframework.web: INFO

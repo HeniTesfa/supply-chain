@@ -1,0 +1,199 @@
+#version: '3.8'
+
+services:
+  # Infrastructure Services
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - supply-chain-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - supply-chain-network
+
+  mongodb:
+    image: mongo:latest
+    container_name: mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: supply_chain_db
+    volumes:
+      - mongodb-data:/data/db
+    networks:
+      - supply-chain-network
+
+  # Backend Services
+  consumer-service:
+    build:
+      context: .
+      dockerfile: consumer-service/Dockerfile
+    container_name: consumer-service
+    restart: on-failure
+    ports:
+      - "8081:8081"
+    depends_on:
+      - kafka
+      - mongodb
+      - loader-service
+    environment:
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SPRING_DATA_MONGODB_URI: mongodb://mongodb:27017/supply_chain_db
+      LOADER_SERVICE_URL: http://loader-service:8082
+    networks:
+      - supply-chain-network
+
+  producer-service:
+    build:
+      context: .
+      dockerfile: producer-service/Dockerfile
+    container_name: producer-service
+    restart: on-failure
+    ports:
+      - "8087:8087"
+    depends_on:
+      - kafka
+      - mongodb
+    environment:
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SPRING_DATA_MONGODB_URI: mongodb://mongodb:27017/supply_chain_db
+    networks:
+      - supply-chain-network
+
+  loader-service:
+    build:
+      context: .
+      dockerfile: loader-service/Dockerfile
+    container_name: loader-service
+    ports:
+      - "8082:8082"
+    environment:
+      SERVICES_ITEM_SERVICE_URL: http://item-service:8083
+      SERVICES_TRADE_ITEM_SERVICE_URL: http://trade-item-service:8084
+      SERVICES_SUPPLIER_SUPPLY_SERVICE_URL: http://supplier-supply-service:8085
+      SERVICES_SHIPMENT_SERVICE_URL: http://shipment-service:8086
+    networks:
+      - supply-chain-network
+
+  item-service:
+    build:
+      context: .
+      dockerfile: item-service/Dockerfile
+    container_name: item-service
+    ports:
+      - "8083:8083"
+    depends_on:
+      - osp-mock-api
+    environment:
+      OSP_API_URL: http://osp-mock-api:9000
+      SPRING_DATA_MONGODB_URI: mongodb://mongodb:27017/supply_chain_db
+    networks:
+      - supply-chain-network
+
+  trade-item-service:
+    build:
+      context: .
+      dockerfile: trade-item-service/Dockerfile
+    container_name: trade-item-service
+    ports:
+      - "8084:8084"
+    networks:
+      - supply-chain-network
+
+  supplier-supply-service:
+    build:
+      context: .
+      dockerfile: supplier-supply-service/Dockerfile
+    container_name: supplier-supply-service
+    ports:
+      - "8085:8085"
+    networks:
+      - supply-chain-network
+
+  shipment-service:
+    build:
+      context: .
+      dockerfile: shipment-service/Dockerfile
+    container_name: shipment-service
+    ports:
+      - "8086:8086"
+    networks:
+      - supply-chain-network
+
+  osp-mock-api:
+    build:
+      context: .
+      dockerfile: osp-mock-api/Dockerfile
+    container_name: osp-mock-api
+    ports:
+      - "9000:9000"
+    networks:
+      - supply-chain-network
+
+  # BFF API Gateway
+  bff-service:
+    build:
+      context: .
+      dockerfile: bff-service/Dockerfile
+    container_name: bff-service
+    restart: on-failure
+    ports:
+      - "8080:8080"
+    depends_on:
+      - producer-service
+      - consumer-service
+    environment:
+      SERVICES_PRODUCER_SERVICE_URL: http://producer-service:8087
+      SERVICES_CONSUMER_SERVICE_URL: http://consumer-service:8081
+    networks:
+      - supply-chain-network
+
+  # Frontend Services
+  producer-ui:
+    build:
+      context: .
+      dockerfile: producer-ui/Dockerfile
+    container_name: producer-ui
+    ports:
+      - "3000:3000"
+    depends_on:
+      - bff-service
+    networks:
+      - supply-chain-network
+
+  monitoring-ui:
+    build:
+      context: .
+      dockerfile: monitoring-ui/Dockerfile
+    container_name: monitoring-ui
+    ports:
+      - "3001:3001"
+    depends_on:
+      - bff-service
+    networks:
+      - supply-chain-network
+
+networks:
+  supply-chain-network:
+    driver: bridge
+
+volumes:
+  mongodb-data:
