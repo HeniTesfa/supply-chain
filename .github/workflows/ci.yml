@@ -12,18 +12,21 @@ name: CI - Build & Test
 # ---- Trigger Configuration ----
 # Define which Git events will trigger this workflow to run
 on:
-  # Trigger on every push to main or develop branches
+  # Run on pushes to long-lived branches and all feature/fix/hotfix branches
   push:
-    # Only run when commits are pushed to these long-lived branches
     branches:
-      - main       # Production-ready code
-      - develop    # Integration branch for feature work
-  # Trigger on pull requests targeting main or develop branches
+      - main          # Production-ready code
+      - develop       # Integration branch
+      - 'feature/**'  # Feature branches  — CI runs on every push
+      - 'feat/**'     # Alternative prefix
+      - 'fix/**'      # Bug fix branches
+      - 'hotfix/**'   # Urgent fixes
+      - 'chore/**'    # Maintenance tasks
+  # Run on PRs targeting main or develop (catches forks and branch PRs)
   pull_request:
-    # Only run when PRs are opened/updated against these branches
     branches:
-      - main       # PRs going into production
-      - develop    # PRs going into integration
+      - main          # PRs going into production  (require approval via branch protection)
+      - develop       # PRs going into integration
 
 # ---- Concurrency Control ----
 # Prevent duplicate workflow runs for the same branch/PR

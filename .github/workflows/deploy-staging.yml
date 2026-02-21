@@ -1,27 +1,39 @@
 # =============================================================================
 # Staging Deployment Workflow - Deploy to AWS ECS Staging Environment
 # =============================================================================
-# This workflow automatically deploys all services to the staging environment
-# whenever code is pushed to the main branch. It builds Docker images, pushes
-# them to Amazon ECR (Elastic Container Registry), and deploys to ECS
-# (Elastic Container Service) using rolling updates.
 #
-# Prerequisites (configured as GitHub repository secrets):
-#   - AWS_ACCOUNT_ID: The 12-digit AWS account number
-#   - AWS_REGION: The AWS region (e.g., us-east-1)
-#   - AWS_IAM_ROLE_ARN: IAM role ARN for GitHub OIDC authentication
-#   - ECS_CLUSTER_STAGING: Name of the ECS cluster for staging
+# STRATEGY: Main → Staging (Approved)
+#
+# This workflow runs when a PR is merged into main. It does NOT deploy
+# automatically — it first pauses at the 'await-approval' job and waits
+# for a designated reviewer to approve the deployment in the GitHub Actions UI.
+#
+# Approval gate setup (one-time, in GitHub):
+#   Repository → Settings → Environments → staging-approval
+#   → Add "Required reviewers" → add yourself or your team
+#   → Save protection rules
+#
+# Pipeline (in order):
+#   1. await-approval     PAUSES — reviewer must approve in GitHub Actions UI
+#   2. build-and-push     Build Docker images → push to ECR (AWS creds needed)
+#   3. deploy-staging     Update ECS task definitions → rolling deploy (AWS creds needed)
+#
+# Prerequisites (GitHub Actions secrets):
+#   - AWS_ACCOUNT_ID     12-digit AWS account number
+#   - AWS_REGION         AWS region (e.g. us-east-1)
+#   - AWS_IAM_ROLE_ARN   IAM role ARN for GitHub OIDC authentication
+#   - ECS_CLUSTER_STAGING  Name of the staging ECS cluster
 # =============================================================================
 
-# Name displayed in the GitHub Actions UI for this workflow
 name: Deploy to Staging
 
-# ---- Trigger Configuration ----
-# Only deploy to staging when code is pushed (merged) to the main branch
+# ---- Trigger ----
+# Fires when a PR is merged into main (push event on main branch).
+# Branch protection on main ensures every commit arrives via an approved PR.
 on:
   push:
     branches:
-      - main  # Trigger on every push to main (typically via merged PRs)
+      - main  # Only reachable via approved + merged PR (enforced by branch protection)
 
 # ---- Environment Variables ----
 # Global environment variables available to all jobs and steps in this workflow
@@ -55,17 +67,48 @@ permissions:
 jobs:
 
   # ===========================================================================
-  # Job 1: Build Docker Images and Push to ECR
+  # Job 1: Await Deployment Approval  ← GATE — no AWS needed
+  # ===========================================================================
+  # This job uses the 'staging-approval' GitHub Environment.
+  # The workflow PAUSES here until a required reviewer clicks
+  # "Approve and deploy" in the GitHub Actions UI.
+  #
+  # To configure required reviewers (one-time setup):
+  #   GitHub → Settings → Environments → staging-approval
+  #   → Required reviewers → add reviewer(s) → Save protection rules
+  #
+  # The gate expires after 30 days if nobody approves.
+  # ===========================================================================
+  await-approval:
+    name: Await Staging Deployment Approval
+    runs-on: ubuntu-latest
+    environment:
+      name: staging-approval   # Configure required reviewers on this environment
+
+    steps:
+      - name: Deployment approved
+        run: |
+          echo "============================================="
+          echo "  STAGING DEPLOYMENT APPROVED"
+          echo "============================================="
+          echo "Approved by : ${{ github.actor }}"
+          echo "Commit      : ${{ github.sha }}"
+          echo "Branch      : ${{ github.ref_name }}"
+          echo "Triggered by: ${{ github.event_name }}"
+          echo "============================================="
+
+  # ===========================================================================
+  # Job 2: Build Docker Images and Push to ECR
   # ===========================================================================
   # Builds Docker images for all 10 services using a matrix strategy and pushes
   # them to their respective ECR repositories. Each service gets its own ECR
   # repository following the naming pattern: supply-chain-<service-name>
   # ===========================================================================
   build-and-push:
-    # Display name includes the service name from the matrix for clarity
     name: Build & Push - ${{ matrix.service }}
-    # Run on the latest Ubuntu runner
     runs-on: ubuntu-latest
+    # Only runs after a reviewer approves the deployment in the GitHub Actions UI
+    needs: await-approval
 
     # ---- Matrix Strategy ----
     # Build all 10 services in parallel to minimize total deployment time

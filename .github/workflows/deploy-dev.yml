@@ -1,21 +1,28 @@
 # =============================================================================
 # Dev Deployment Workflow — No AWS Credentials Required
 # =============================================================================
-# Deploys the supply chain system to a dev environment using docker-compose.
-# This workflow does NOT require any AWS credentials — it builds Docker images
-# locally and starts the full stack via docker-compose-dev.yml.
 #
-# Trigger: automatically on every push to the 'develop' branch.
+# STRATEGY: Push to Feature → Dev
 #
-# What this workflow does:
-#   1. Checks out the code
-#   2. Sets up Java 17 and Node.js 18
-#   3. Builds the Maven multi-module project
-#   4. Builds all Docker images with the 'dev' Spring profile
-#   5. Validates the full stack starts cleanly (health check)
-#   6. Tears down the stack
+# Triggers on any push to a feature/fix/hotfix/chore branch so every developer
+# gets immediate feedback that their branch builds and boots correctly — before
+# they open a PR. No AWS account or credentials are required at any step.
 #
-# NO secrets required — safe to run without any AWS account setup.
+# Supported branch prefixes:
+#   feature/*   — new features
+#   fix/*        — bug fixes
+#   feat/*       — alternative feature prefix
+#   hotfix/*     — urgent production fixes branched from main
+#   chore/*      — maintenance tasks (deps, config, docs)
+#   develop      — integration branch
+#
+# Pipeline:
+#   1. build-backend      Build all 9 Maven modules (skip tests — CI handles those)
+#   2. build-frontends    Build both React apps
+#   3. validate-dev-stack Build Docker images, start stack via docker-compose-dev.yml,
+#                         health-check all 9 services, then tear down
+#
+# NO secrets required — safe to run on any fork or branch.
 # =============================================================================
 
 name: Deploy to Dev
@@ -23,12 +30,22 @@ name: Deploy to Dev
 on:
   push:
     branches:
-      - develop   # Trigger on every push to the develop integration branch
-  workflow_dispatch:  # Allow manual trigger from the GitHub Actions UI
+      - develop           # Integration branch
+      - 'feature/**'      # Feature branches  (e.g. feature/add-retry-logic)
+      - 'feat/**'         # Alternative prefix (e.g. feat/kafka-dedup)
+      - 'fix/**'          # Bug fix branches  (e.g. fix/null-pointer-consumer)
+      - 'hotfix/**'       # Urgent fixes      (e.g. hotfix/missing-idempotency-key)
+      - 'chore/**'        # Maintenance       (e.g. chore/bump-spring-boot)
+  workflow_dispatch:      # Allow manual trigger from the GitHub Actions UI
 
-# Cancel any in-progress dev deployment when a newer commit is pushed
+# ---------------------------------------------------------------------------
+# Concurrency: one run per branch at a time.
+# Using github.ref (full ref including branch name) means:
+#   - feature/foo and feature/bar run in PARALLEL — they don't cancel each other
+#   - A new push to feature/foo cancels the in-progress run for feature/foo only
+# ---------------------------------------------------------------------------
 concurrency:
-  group: deploy-dev
+  group: deploy-dev-${{ github.ref }}
   cancel-in-progress: true
 
 # Minimal permissions — no AWS OIDC token needed
@@ -38,7 +55,7 @@ permissions:
 jobs:
 
   # ===========================================================================
-  # Job 1: Build Backend
+  # Job 1: Build Backend (Maven)
   # ===========================================================================
   build-backend:
     name: Build Backend (Maven)
@@ -55,21 +72,20 @@ jobs:
           distribution: 'temurin'
           cache: 'maven'
 
-      # Build all 9 Spring Boot services and skip tests
-      # (tests run separately in the CI workflow on every PR)
       - name: Build all services with Maven
         run: mvn clean package -DskipTests -B
+        # -DskipTests: tests run in ci.yml on every PR — no need to re-run here
+        # -B: batch mode (non-interactive, better CI output)
 
-      # Upload JARs so the docker-build job can use them without re-compiling
       - name: Upload compiled JARs
         uses: actions/upload-artifact@v4
         with:
-          name: service-jars
+          name: service-jars-${{ github.run_id }}
           path: '**/target/*.jar'
           retention-days: 1
 
   # ===========================================================================
-  # Job 2: Build Frontend Apps
+  # Job 2: Build Frontend Apps (React)
   # ===========================================================================
   build-frontends:
     name: Build Frontends (React)
@@ -101,8 +117,9 @@ jobs:
   # ===========================================================================
   # Job 3: Build Docker Images and Validate Dev Stack
   # ===========================================================================
-  # No AWS credentials needed — images are built locally and tested with
-  # docker-compose. The 'dev' Spring profile is activated via env vars.
+  # Builds all Docker images using docker-compose-dev.yml (SPRING_PROFILES_ACTIVE=dev),
+  # starts the full stack, verifies every service's /actuator/health endpoint,
+  # then tears everything down. No ECR push. No AWS credentials.
   # ===========================================================================
   validate-dev-stack:
     name: Validate Dev Stack (docker-compose)
@@ -115,34 +132,26 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      # Restore compiled JARs so Docker multi-stage builds can copy them
       - name: Download compiled JARs
         uses: actions/download-artifact@v4
         with:
-          name: service-jars
+          name: service-jars-${{ github.run_id }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Build all Docker images using the dev compose file.
-      # SPRING_PROFILES_ACTIVE=dev and ENVIRONMENT=dev are set in docker-compose-dev.yml.
-      # No ECR push — images stay on the runner.
-      - name: Build all Docker images (dev profile)
+      - name: Build all Docker images (dev profile, no push)
         run: docker compose -f docker-compose-dev.yml build
         env:
           COMPOSE_DOCKER_CLI_BUILD: 1
           DOCKER_BUILDKIT: 1
 
-      # Start the full stack and wait for services to become healthy.
-      # Infrastructure (Kafka, MongoDB) must be ready before services start.
       - name: Start dev stack
         run: |
           docker compose -f docker-compose-dev.yml up -d
           echo "Waiting 60s for services to initialise..."
           sleep 60
 
-      # Verify each backend service's health endpoint responds with HTTP 200.
-      # No AWS credentials required — all services connect to local containers.
       - name: Health check all backend services
         run: |
           check_health() {
@@ -151,9 +160,9 @@ jobs:
             local status
             status=$(curl -s -o /dev/null -w "%{http_code}" "$url")
             if [ "$status" = "200" ]; then
-              echo "✓ $name is healthy (HTTP $status)"
+              echo "✓  $name — healthy (HTTP $status)"
             else
-              echo "✗ $name is NOT healthy (HTTP $status)"
+              echo "✗  $name — NOT healthy (HTTP $status)"
               return 1
             fi
           }
@@ -168,23 +177,22 @@ jobs:
           check_health "producer-service"         http://localhost:8087/actuator/health
           check_health "osp-mock-api"             http://localhost:9000/api/health
 
-      # Print logs for debugging if any health check failed
       - name: Print service logs on failure
         if: failure()
         run: docker compose -f docker-compose-dev.yml logs --tail=50
 
-      # Always tear down the stack to free runner resources
       - name: Tear down dev stack
         if: always()
         run: docker compose -f docker-compose-dev.yml down -v
 
-      - name: Dev deployment validation passed
+      - name: Dev deployment summary
         run: |
           echo "============================================="
           echo "  DEV STACK VALIDATION PASSED"
           echo "============================================="
+          echo "Branch   : ${{ github.ref_name }}"
+          echo "Commit   : ${{ github.sha }}"
           echo "Profile  : dev"
           echo "AWS creds: NOT required"
-          echo "Commit   : ${{ github.sha }}"
-          echo "Branch   : ${{ github.ref_name }}"
+          echo "Next step: open a PR → develop, then → main"
           echo "============================================="
