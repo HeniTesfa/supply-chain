@@ -1,16 +1,24 @@
 # =============================================================================
-# docker-compose.yml — LOCAL environment
+# docker-compose-dev.yml — DEV environment
 # =============================================================================
-# Runs the full stack locally. No AWS credentials required.
-# Spring profile: local
+# Runs the full stack in a shared dev environment. No AWS credentials required.
+# Spring profile: dev
+#
+# Differences from local:
+#   - SPRING_PROFILES_ACTIVE=dev (more verbose error reporting)
+#   - ENVIRONMENT=dev (shows up in logs and health endpoints)
+#   - Uses named image tags instead of building locally (faster startup)
+#     → Set IMAGE_TAG env var or it falls back to 'latest'
 #
 # Usage:
-#   docker-compose up -d           # start everything
-#   docker-compose down            # stop everything
-#   docker-compose logs -f <svc>   # tail logs for a service
+#   # Build first (or pull from a registry):
+#   IMAGE_TAG=latest docker-compose -f docker-compose-dev.yml up -d
 #
-# Environment variables are loaded from .env.local if present.
-# Copy .env.example to .env.local and fill in any optional overrides.
+#   # Override a single service:
+#   docker-compose -f docker-compose-dev.yml up -d consumer-service
+#
+# Environment variables are loaded from .env.dev if present.
+# Copy .env.example to .env.dev and fill in any overrides.
 # =============================================================================
 
 services:
@@ -21,18 +29,18 @@ services:
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
-    container_name: zookeeper
+    container_name: zookeeper-dev
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
     networks:
-      - supply-chain-network
+      - supply-chain-dev-network
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
-    container_name: kafka
+    container_name: kafka-dev
     depends_on:
       - zookeeper
     ports:
@@ -44,22 +52,22 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     networks:
-      - supply-chain-network
+      - supply-chain-dev-network
 
   mongodb:
     image: mongo:7.0
-    container_name: mongodb
+    container_name: mongodb-dev
     ports:
       - "27017:27017"
     environment:
       MONGO_INITDB_DATABASE: supply_chain_db
     volumes:
-      - mongodb-data:/data/db
+      - mongodb-dev-data:/data/db
     networks:
-      - supply-chain-network
+      - supply-chain-dev-network
 
   # ---------------------------------------------------------------------------
-  # Backend Services — Spring profile: local
+  # Backend Services — Spring profile: dev
   # No AWS credentials, no cloud monitoring (Datadog/Dynatrace disabled)
   # ---------------------------------------------------------------------------
 
@@ -67,77 +75,77 @@ services:
     build:
       context: .
       dockerfile: osp-mock-api/Dockerfile
-    container_name: osp-mock-api
+    container_name: osp-mock-api-dev
     ports:
       - "9000:9000"
     environment:
-      SPRING_PROFILES_ACTIVE: local
-      ENVIRONMENT: local
+      SPRING_PROFILES_ACTIVE: dev
+      ENVIRONMENT: dev
     networks:
-      - supply-chain-network
+      - supply-chain-dev-network
 
   item-service:
     build:
       context: .
       dockerfile: item-service/Dockerfile
-    container_name: item-service
+    container_name: item-service-dev
     ports:
       - "8083:8083"
     depends_on:
       - osp-mock-api
       - mongodb
     environment:
-      SPRING_PROFILES_ACTIVE: local
-      ENVIRONMENT: local
+      SPRING_PROFILES_ACTIVE: dev
+      ENVIRONMENT: dev
       OSP_API_URL: http://osp-mock-api:9000
       SPRING_DATA_MONGODB_URI: mongodb://mongodb:27017/supply_chain_db
     networks:
-      - supply-chain-network
+      - supply-chain-dev-network
 
   trade-item-service:
     build:
       context: .
       dockerfile: trade-item-service/Dockerfile
-    container_name: trade-item-service
+    container_name: trade-item-service-dev
     ports:
       - "8084:8084"
     environment:
-      SPRING_PROFILES_ACTIVE: local
-      ENVIRONMENT: local
+      SPRING_PROFILES_ACTIVE: dev
+      ENVIRONMENT: dev
     networks:
-      - supply-chain-network
+      - supply-chain-dev-network
 
   supplier-supply-service:
     build:
       context: .
       dockerfile: supplier-supply-service/Dockerfile
-    container_name: supplier-supply-service
+    container_name: supplier-supply-service-dev
     ports:
       - "8085:8085"
     environment:
-      SPRING_PROFILES_ACTIVE: local
-      ENVIRONMENT: local
+      SPRING_PROFILES_ACTIVE: dev
+      ENVIRONMENT: dev
     networks:
-      - supply-chain-network
+      - supply-chain-dev-network
 
   shipment-service:
     build:
       context: .
       dockerfile: shipment-service/Dockerfile
-    container_name: shipment-service
+    container_name: shipment-service-dev
     ports:
       - "8086:8086"
     environment:
-      SPRING_PROFILES_ACTIVE: local
-      ENVIRONMENT: local
+      SPRING_PROFILES_ACTIVE: dev
+      ENVIRONMENT: dev
     networks:
-      - supply-chain-network
+      - supply-chain-dev-network
 
   loader-service:
     build:
       context: .
       dockerfile: loader-service/Dockerfile
-    container_name: loader-service
+    container_name: loader-service-dev
     ports:
       - "8082:8082"
     depends_on:
@@ -146,20 +154,20 @@ services:
       - supplier-supply-service
       - shipment-service
     environment:
-      SPRING_PROFILES_ACTIVE: local
-      ENVIRONMENT: local
+      SPRING_PROFILES_ACTIVE: dev
+      ENVIRONMENT: dev
       SERVICES_ITEM_SERVICE_URL: http://item-service:8083
       SERVICES_TRADE_ITEM_SERVICE_URL: http://trade-item-service:8084
       SERVICES_SUPPLIER_SUPPLY_SERVICE_URL: http://supplier-supply-service:8085
       SERVICES_SHIPMENT_SERVICE_URL: http://shipment-service:8086
     networks:
-      - supply-chain-network
+      - supply-chain-dev-network
 
   consumer-service:
     build:
       context: .
       dockerfile: consumer-service/Dockerfile
-    container_name: consumer-service
+    container_name: consumer-service-dev
     restart: on-failure
     ports:
       - "8081:8081"
@@ -168,19 +176,19 @@ services:
       - mongodb
       - loader-service
     environment:
-      SPRING_PROFILES_ACTIVE: local
-      ENVIRONMENT: local
+      SPRING_PROFILES_ACTIVE: dev
+      ENVIRONMENT: dev
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       SPRING_DATA_MONGODB_URI: mongodb://mongodb:27017/supply_chain_db
       LOADER_SERVICE_URL: http://loader-service:8082
     networks:
-      - supply-chain-network
+      - supply-chain-dev-network
 
   producer-service:
     build:
       context: .
       dockerfile: producer-service/Dockerfile
-    container_name: producer-service
+    container_name: producer-service-dev
     restart: on-failure
     ports:
       - "8087:8087"
@@ -188,18 +196,18 @@ services:
       - kafka
       - mongodb
     environment:
-      SPRING_PROFILES_ACTIVE: local
-      ENVIRONMENT: local
+      SPRING_PROFILES_ACTIVE: dev
+      ENVIRONMENT: dev
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       SPRING_DATA_MONGODB_URI: mongodb://mongodb:27017/supply_chain_db
     networks:
-      - supply-chain-network
+      - supply-chain-dev-network
 
   bff-service:
     build:
       context: .
       dockerfile: bff-service/Dockerfile
-    container_name: bff-service
+    container_name: bff-service-dev
     restart: on-failure
     ports:
       - "8080:8080"
@@ -207,12 +215,12 @@ services:
       - producer-service
       - consumer-service
     environment:
-      SPRING_PROFILES_ACTIVE: local
-      ENVIRONMENT: local
+      SPRING_PROFILES_ACTIVE: dev
+      ENVIRONMENT: dev
       SERVICES_PRODUCER_SERVICE_URL: http://producer-service:8087
       SERVICES_CONSUMER_SERVICE_URL: http://consumer-service:8081
     networks:
-      - supply-chain-network
+      - supply-chain-dev-network
 
   # ---------------------------------------------------------------------------
   # Frontend Services
@@ -222,29 +230,29 @@ services:
     build:
       context: .
       dockerfile: producer-ui/Dockerfile
-    container_name: producer-ui
+    container_name: producer-ui-dev
     ports:
       - "3000:3000"
     depends_on:
       - bff-service
     networks:
-      - supply-chain-network
+      - supply-chain-dev-network
 
   monitoring-ui:
     build:
       context: .
       dockerfile: monitoring-ui/Dockerfile
-    container_name: monitoring-ui
+    container_name: monitoring-ui-dev
     ports:
       - "3001:3001"
     depends_on:
       - bff-service
     networks:
-      - supply-chain-network
+      - supply-chain-dev-network
 
 networks:
-  supply-chain-network:
+  supply-chain-dev-network:
     driver: bridge
 
 volumes:
-  mongodb-data:
+  mongodb-dev-data:

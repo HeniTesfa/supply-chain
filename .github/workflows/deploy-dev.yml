@@ -1,0 +1,190 @@
+# =============================================================================
+# Dev Deployment Workflow — No AWS Credentials Required
+# =============================================================================
+# Deploys the supply chain system to a dev environment using docker-compose.
+# This workflow does NOT require any AWS credentials — it builds Docker images
+# locally and starts the full stack via docker-compose-dev.yml.
+#
+# Trigger: automatically on every push to the 'develop' branch.
+#
+# What this workflow does:
+#   1. Checks out the code
+#   2. Sets up Java 17 and Node.js 18
+#   3. Builds the Maven multi-module project
+#   4. Builds all Docker images with the 'dev' Spring profile
+#   5. Validates the full stack starts cleanly (health check)
+#   6. Tears down the stack
+#
+# NO secrets required — safe to run without any AWS account setup.
+# =============================================================================
+
+name: Deploy to Dev
+
+on:
+  push:
+    branches:
+      - develop   # Trigger on every push to the develop integration branch
+  workflow_dispatch:  # Allow manual trigger from the GitHub Actions UI
+
+# Cancel any in-progress dev deployment when a newer commit is pushed
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: true
+
+# Minimal permissions — no AWS OIDC token needed
+permissions:
+  contents: read
+
+jobs:
+
+  # ===========================================================================
+  # Job 1: Build Backend
+  # ===========================================================================
+  build-backend:
+    name: Build Backend (Maven)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      # Build all 9 Spring Boot services and skip tests
+      # (tests run separately in the CI workflow on every PR)
+      - name: Build all services with Maven
+        run: mvn clean package -DskipTests -B
+
+      # Upload JARs so the docker-build job can use them without re-compiling
+      - name: Upload compiled JARs
+        uses: actions/upload-artifact@v4
+        with:
+          name: service-jars
+          path: '**/target/*.jar'
+          retention-days: 1
+
+  # ===========================================================================
+  # Job 2: Build Frontend Apps
+  # ===========================================================================
+  build-frontends:
+    name: Build Frontends (React)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: producer-ui/package-lock.json
+
+      - name: Build Producer UI
+        working-directory: producer-ui
+        run: npm ci && npm run build
+        env:
+          CI: true
+
+      - name: Build Monitoring UI
+        working-directory: monitoring-ui
+        run: npm ci && npm run build
+        env:
+          CI: true
+
+  # ===========================================================================
+  # Job 3: Build Docker Images and Validate Dev Stack
+  # ===========================================================================
+  # No AWS credentials needed — images are built locally and tested with
+  # docker-compose. The 'dev' Spring profile is activated via env vars.
+  # ===========================================================================
+  validate-dev-stack:
+    name: Validate Dev Stack (docker-compose)
+    runs-on: ubuntu-latest
+    needs:
+      - build-backend
+      - build-frontends
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # Restore compiled JARs so Docker multi-stage builds can copy them
+      - name: Download compiled JARs
+        uses: actions/download-artifact@v4
+        with:
+          name: service-jars
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build all Docker images using the dev compose file.
+      # SPRING_PROFILES_ACTIVE=dev and ENVIRONMENT=dev are set in docker-compose-dev.yml.
+      # No ECR push — images stay on the runner.
+      - name: Build all Docker images (dev profile)
+        run: docker compose -f docker-compose-dev.yml build
+        env:
+          COMPOSE_DOCKER_CLI_BUILD: 1
+          DOCKER_BUILDKIT: 1
+
+      # Start the full stack and wait for services to become healthy.
+      # Infrastructure (Kafka, MongoDB) must be ready before services start.
+      - name: Start dev stack
+        run: |
+          docker compose -f docker-compose-dev.yml up -d
+          echo "Waiting 60s for services to initialise..."
+          sleep 60
+
+      # Verify each backend service's health endpoint responds with HTTP 200.
+      # No AWS credentials required — all services connect to local containers.
+      - name: Health check all backend services
+        run: |
+          check_health() {
+            local name=$1
+            local url=$2
+            local status
+            status=$(curl -s -o /dev/null -w "%{http_code}" "$url")
+            if [ "$status" = "200" ]; then
+              echo "✓ $name is healthy (HTTP $status)"
+            else
+              echo "✗ $name is NOT healthy (HTTP $status)"
+              return 1
+            fi
+          }
+
+          check_health "bff-service"              http://localhost:8080/actuator/health
+          check_health "consumer-service"         http://localhost:8081/actuator/health
+          check_health "loader-service"           http://localhost:8082/actuator/health
+          check_health "item-service"             http://localhost:8083/actuator/health
+          check_health "trade-item-service"       http://localhost:8084/actuator/health
+          check_health "supplier-supply-service"  http://localhost:8085/actuator/health
+          check_health "shipment-service"         http://localhost:8086/actuator/health
+          check_health "producer-service"         http://localhost:8087/actuator/health
+          check_health "osp-mock-api"             http://localhost:9000/api/health
+
+      # Print logs for debugging if any health check failed
+      - name: Print service logs on failure
+        if: failure()
+        run: docker compose -f docker-compose-dev.yml logs --tail=50
+
+      # Always tear down the stack to free runner resources
+      - name: Tear down dev stack
+        if: always()
+        run: docker compose -f docker-compose-dev.yml down -v
+
+      - name: Dev deployment validation passed
+        run: |
+          echo "============================================="
+          echo "  DEV STACK VALIDATION PASSED"
+          echo "============================================="
+          echo "Profile  : dev"
+          echo "AWS creds: NOT required"
+          echo "Commit   : ${{ github.sha }}"
+          echo "Branch   : ${{ github.ref_name }}"
+          echo "============================================="

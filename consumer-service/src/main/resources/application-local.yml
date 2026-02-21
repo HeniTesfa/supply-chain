@@ -1,0 +1,25 @@
+# =============================================================================
+# consumer-service — LOCAL profile
+# =============================================================================
+# Activated by: SPRING_PROFILES_ACTIVE=local
+# Used by     : docker-compose.yml, IDE run configurations
+# AWS needed  : NO
+# Monitoring  : Datadog and Dynatrace DISABLED
+# Logging     : Plain text (human-readable) via logback-spring.xml
+# =============================================================================
+
+management:
+  metrics:
+    export:
+      datadog:
+        enabled: false
+      dynatrace:
+        enabled: false
+    tags:
+      environment: local
+
+logging:
+  level:
+    com.supplychain.consumer: DEBUG
+    org.springframework.kafka: INFO
+    org.springframework.data.mongodb: INFO
