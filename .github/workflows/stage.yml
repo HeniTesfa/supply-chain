@@ -1,0 +1,104 @@
+# =============================================================================
+# Stage Deployment — Reusable Workflow
+# =============================================================================
+# Called by pipeline.yml after deploy-dev succeeds.
+# Re-tags the immutable dev-<sha> image to stage-<sha> (no rebuild),
+# then deploys all 10 services to the staging ECS cluster in parallel.
+#
+# GitHub Environment required: stage
+#   Settings → Environments → stage
+#   → Variables: SPRING_PROFILE, MONGODB_URI, KAFKA_BROKERS, ECS_CLUSTER
+#   → Required reviewers: add your team (manual approval gate)
+# =============================================================================
+
+name: Deploy — Stage
+
+on:
+  workflow_call:
+    inputs:
+      image_tag:
+        description: 'Git commit SHA used as the Docker image tag'
+        required: true
+        type: string
+
+jobs:
+
+  deploy:
+    name: ${{ matrix.service }}
+    runs-on: ubuntu-latest
+
+    environment:
+      name: stage
+      url: https://staging.supplychain.example.com
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - consumer-service
+          - loader-service
+          - item-service
+          - trade-item-service
+          - supplier-supply-service
+          - shipment-service
+          - producer-service
+          - osp-mock-api
+          - producer-ui
+          - monitoring-ui
+
+    env:
+      ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Promote image dev-<sha> → stage-<sha>
+        run: |
+          DEV="${ECR_REGISTRY}/supply-chain-${{ matrix.service }}:dev-${{ inputs.image_tag }}"
+          STAGE="${ECR_REGISTRY}/supply-chain-${{ matrix.service }}:stage-${{ inputs.image_tag }}"
+          docker pull  "$DEV"
+          docker tag   "$DEV" "$STAGE"
+          docker push  "$STAGE"
+          echo "✓ $DEV → $STAGE"
+
+      - name: Download task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition staging-supply-chain-${{ matrix.service }} \
+            --query 'taskDefinition' \
+            | jq 'del(.taskDefinitionArn,.revision,.status,
+                      .requiresAttributes,.compatibilities,
+                      .registeredAt,.registeredBy)' \
+            > task-def.json
+
+      - name: Patch environment variables
+        run: |
+          jq --arg profile "${{ vars.SPRING_PROFILE }}" \
+             --arg mongo   "${{ vars.MONGODB_URI }}" \
+             --arg kafka   "${{ vars.KAFKA_BROKERS }}" \
+             '.containerDefinitions[0].environment = [
+               {"name":"SPRING_PROFILES_ACTIVE",        "value":$profile},
+               {"name":"SPRING_DATA_MONGODB_URI",        "value":$mongo},
+               {"name":"SPRING_KAFKA_BOOTSTRAP_SERVERS", "value":$kafka}
+             ]' task-def.json > patched.json && mv patched.json task-def.json
+
+      - id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-def.json
+          container-name: ${{ matrix.service }}
+          image: ${{ env.ECR_REGISTRY }}/supply-chain-${{ matrix.service }}:stage-${{ inputs.image_tag }}
+
+      - uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: staging-supply-chain-${{ matrix.service }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          wait-for-service-stability: true

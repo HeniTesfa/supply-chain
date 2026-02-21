@@ -1,0 +1,151 @@
+# =============================================================================
+# CI/CD Pipeline — Orchestrator
+# =============================================================================
+#
+# LINEAR PROMOTION:  Build → dev.yml → stage.yml → prod.yml
+#
+# feature/* push     → Build only (no deployment, no AWS credentials needed)
+# workflow_dispatch  → Build → Deploy Dev → Promote Stage → Release Prod
+#                               (auto)        (approval)      (approval)
+# =============================================================================
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - 'feature/**'
+      - 'feat/**'
+      - 'fix/**'
+      - 'hotfix/**'
+      - 'chore/**'
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for manual deployment (optional)'
+        required: false
+        default: ''
+
+env:
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+  IMAGE_TAG: ${{ github.sha }}
+
+concurrency:
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write   # create git release tags
+  id-token: write   # AWS OIDC
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # Build: compile Maven + React + build Docker images
+  #   feature push      → build only, no push (Dockerfile verification)
+  #   workflow_dispatch → build + push dev-<sha> images to ECR
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build & Verify
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Maven compile (all modules)
+        run: mvn clean package -DskipTests -B
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: producer-ui/package-lock.json
+
+      - name: Build Producer UI
+        working-directory: producer-ui
+        run: npm ci && npm run build
+        env:
+          CI: true
+
+      - name: Build Monitoring UI
+        working-directory: monitoring-ui
+        run: npm ci && npm run build
+        env:
+          CI: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials
+        if: github.event_name == 'workflow_dispatch'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        if: github.event_name == 'workflow_dispatch'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker images
+        env:
+          PUSH: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          SERVICES=(
+            consumer-service loader-service item-service trade-item-service
+            supplier-supply-service shipment-service producer-service
+            osp-mock-api producer-ui monitoring-ui
+          )
+          for S in "${SERVICES[@]}"; do
+            if [ "$PUSH" = "true" ]; then
+              docker buildx build --push \
+                --tag  "${ECR_REGISTRY}/supply-chain-${S}:dev-${IMAGE_TAG}" \
+                --file "./${S}/Dockerfile" \
+                --cache-from "type=registry,ref=${ECR_REGISTRY}/supply-chain-${S}:cache" \
+                --cache-to   "type=registry,ref=${ECR_REGISTRY}/supply-chain-${S}:cache,mode=max" \
+                . && echo "✓ pushed dev-${IMAGE_TAG} — ${S}"
+            else
+              docker buildx build \
+                --tag  "supply-chain-${S}:${IMAGE_TAG}" \
+                --file "./${S}/Dockerfile" \
+                --cache-from "type=gha" \
+                --cache-to   "type=gha,mode=max" \
+                . && echo "✓ built (no push) — ${S}"
+            fi
+          done
+
+  # ---------------------------------------------------------------------------
+  # Deploy Dev  (workflow_dispatch only — skipped on feature push)
+  # ---------------------------------------------------------------------------
+  deploy-dev:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/dev.yml
+    with:
+      image_tag: ${{ github.sha }}
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------
+  # Promote Stage  (manual approval gate — configured on 'stage' environment)
+  # ---------------------------------------------------------------------------
+  promote-stage:
+    needs: deploy-dev
+    uses: ./.github/workflows/stage.yml
+    with:
+      image_tag: ${{ github.sha }}
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------
+  # Release Prod  (manual approval gate — configured on 'prod' environment)
+  # ---------------------------------------------------------------------------
+  release-prod:
+    needs: promote-stage
+    uses: ./.github/workflows/prod.yml
+    with:
+      image_tag: ${{ github.sha }}
+    secrets: inherit

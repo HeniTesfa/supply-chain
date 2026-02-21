@@ -1,0 +1,122 @@
+# =============================================================================
+# Prod Deployment — Reusable Workflow
+# =============================================================================
+# Called by pipeline.yml after promote-stage succeeds.
+# Re-tags the immutable stage-<sha> image to prod-<sha> + :latest (no rebuild),
+# deploys all 10 services to the production ECS cluster in parallel,
+# then creates a signed git release tag: vYYYY.MM.DD-<short-sha>
+#
+# GitHub Environment required: prod
+#   Settings → Environments → prod
+#   → Variables: SPRING_PROFILE, MONGODB_URI, KAFKA_BROKERS, ECS_CLUSTER
+#   → Required reviewers: add your team (manual approval gate)
+# =============================================================================
+
+name: Deploy — Prod
+
+on:
+  workflow_call:
+    inputs:
+      image_tag:
+        description: 'Git commit SHA used as the Docker image tag'
+        required: true
+        type: string
+
+jobs:
+
+  deploy:
+    name: ${{ matrix.service }}
+    runs-on: ubuntu-latest
+
+    environment:
+      name: prod
+      url: https://supplychain.example.com
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - consumer-service
+          - loader-service
+          - item-service
+          - trade-item-service
+          - supplier-supply-service
+          - shipment-service
+          - producer-service
+          - osp-mock-api
+          - producer-ui
+          - monitoring-ui
+
+    env:
+      ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Promote image stage-<sha> → prod-<sha> + latest
+        run: |
+          STAGE="${ECR_REGISTRY}/supply-chain-${{ matrix.service }}:stage-${{ inputs.image_tag }}"
+          PROD="${ECR_REGISTRY}/supply-chain-${{ matrix.service }}:prod-${{ inputs.image_tag }}"
+          LATEST="${ECR_REGISTRY}/supply-chain-${{ matrix.service }}:latest"
+          docker pull  "$STAGE"
+          docker tag   "$STAGE" "$PROD"
+          docker tag   "$STAGE" "$LATEST"
+          docker push  "$PROD"
+          docker push  "$LATEST"
+          echo "✓ $STAGE → $PROD + $LATEST"
+
+      - name: Download task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition prod-supply-chain-${{ matrix.service }} \
+            --query 'taskDefinition' \
+            | jq 'del(.taskDefinitionArn,.revision,.status,
+                      .requiresAttributes,.compatibilities,
+                      .registeredAt,.registeredBy)' \
+            > task-def.json
+
+      - name: Patch environment variables
+        run: |
+          jq --arg profile "${{ vars.SPRING_PROFILE }}" \
+             --arg mongo   "${{ vars.MONGODB_URI }}" \
+             --arg kafka   "${{ vars.KAFKA_BROKERS }}" \
+             '.containerDefinitions[0].environment = [
+               {"name":"SPRING_PROFILES_ACTIVE",        "value":$profile},
+               {"name":"SPRING_DATA_MONGODB_URI",        "value":$mongo},
+               {"name":"SPRING_KAFKA_BOOTSTRAP_SERVERS", "value":$kafka}
+             ]' task-def.json > patched.json && mv patched.json task-def.json
+
+      - id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-def.json
+          container-name: ${{ matrix.service }}
+          image: ${{ env.ECR_REGISTRY }}/supply-chain-${{ matrix.service }}:prod-${{ inputs.image_tag }}
+
+      - uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: prod-supply-chain-${{ matrix.service }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      # Create a git release tag once per release (anchored to consumer-service).
+      # Format: vYYYY.MM.DD-<7-char-sha>  e.g. v2026.02.21-a3f9b2c
+      - name: Create release tag
+        if: matrix.service == 'consumer-service'
+        run: |
+          TAG="v$(date -u +'%Y.%m.%d')-${IMAGE_TAG:0:7}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Production release $TAG — deployed by ${{ github.actor }}"
+          git push origin "$TAG"
+          echo "✓ Released: $TAG"
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
