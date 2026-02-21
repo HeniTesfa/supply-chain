@@ -5,10 +5,11 @@ server:
 
 # Spring framework configuration section: defines core Spring application properties
 spring:
-  # Application identity configuration subsection
   application:
-    # Sets the application name to "supplier-supply-service", used for service discovery, logging, and actuator identification
     name: supplier-supply-service
+  data:
+    mongodb:
+      uri: ${SPRING_DATA_MONGODB_URI:mongodb://localhost:27017/supply_chain_db}
 
 # Management & Actuator configuration section: configures Spring Boot Actuator endpoints for monitoring and observability
 management:

@@ -8,9 +8,17 @@ spring:
 # Downstream service URLs - overridden by environment variables in Docker
 services:
   producer-service:
-    url: http://localhost:8087
+    url: ${PRODUCER_SERVICE_URL:http://localhost:8087}
   consumer-service:
-    url: http://localhost:8081
+    url: ${CONSUMER_SERVICE_URL:http://localhost:8081}
+  item-service:
+    url: ${ITEM_SERVICE_URL:http://localhost:8083}
+  trade-item-service:
+    url: ${TRADE_ITEM_SERVICE_URL:http://localhost:8084}
+  supplier-supply-service:
+    url: ${SUPPLIER_SUPPLY_SERVICE_URL:http://localhost:8085}
+  shipment-service:
+    url: ${SHIPMENT_SERVICE_URL:http://localhost:8086}
 
 management:
   endpoints:

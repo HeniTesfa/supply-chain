@@ -1,4 +1,4 @@
-package com.supplychain.item.entity;
+package com.supplychain.suppliersupply.entity;
 
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -6,7 +6,6 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.mapping.Document;
-import org.springframework.data.mongodb.core.index.Indexed;
 
 import java.time.LocalDateTime;
 
@@ -14,19 +13,18 @@ import java.time.LocalDateTime;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-@Document(collection = "items")
-public class ItemEntity {
+@Document(collection = "supplier_supply")
+public class SupplierSupplyEntity {
 
     @Id
     private String id;
 
-    @Indexed(unique = true)
     private String skuId;
-
-    private String itemName;
-    private String description;
-    private Double price;
-    private Double weight;
+    private String warehouseId;
+    private Integer availableQuantity;
+    private Integer reservedQuantity;
+    private Integer onOrderQuantity;
+    private Integer reorderPoint;
     private String status;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;

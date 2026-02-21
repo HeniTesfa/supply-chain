@@ -1,4 +1,4 @@
-package com.supplychain.item.entity;
+package com.supplychain.shipment.entity;
 
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -14,20 +14,20 @@ import java.time.LocalDateTime;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-@Document(collection = "items")
-public class ItemEntity {
+@Document(collection = "shipments")
+public class ShipmentEntity {
 
     @Id
     private String id;
 
     @Indexed(unique = true)
-    private String skuId;
+    private String trackingNumber;
 
-    private String itemName;
-    private String description;
-    private Double price;
-    private Double weight;
-    private String status;
+    private String orderId;
+    private String carrier;
+    private String shipmentStatus;
+    private String currentLocation;
+    private String estimatedDelivery;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

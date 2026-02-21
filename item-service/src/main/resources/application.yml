@@ -6,10 +6,11 @@ server:
 
 # Spring framework configuration section
 spring:
-  # Application identity configuration
   application:
-    # Sets the application name to "item-service", used in logging, actuator endpoints, and service identification
     name: item-service
+  data:
+    mongodb:
+      uri: ${SPRING_DATA_MONGODB_URI:mongodb://localhost:27017/supply_chain_db}
 
 # OSP (Order Service Provider) API Configuration section - custom application properties for the external API integration
 # These properties are injected into ItemProcessingService via @Value annotations
