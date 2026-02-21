@@ -141,7 +141,7 @@ jobs:
 
       # Step 2: Configure AWS credentials using OIDC federation
       - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           # Assume the IAM role configured for GitHub Actions OIDC
           role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
@@ -248,7 +248,7 @@ jobs:
 
       # Step 2: Configure AWS credentials using OIDC
       - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
@@ -345,7 +345,7 @@ jobs:
 
       # Step 2: Configure AWS credentials using OIDC federation
       - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
@@ -434,7 +434,7 @@ jobs:
 
       # Step 2: Configure AWS credentials using OIDC federation
       - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}

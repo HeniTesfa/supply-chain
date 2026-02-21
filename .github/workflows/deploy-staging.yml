@@ -104,7 +104,7 @@ jobs:
       # It works by: GitHub issues a short-lived OIDC token -> AWS verifies it ->
       # AWS issues temporary credentials scoped to the IAM role
       - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4  # Official AWS credentials action
+        uses: aws-actions/configure-aws-credentials@v6  # Official AWS credentials action
         with:
           # The IAM role ARN that GitHub Actions will assume
           # This role must have a trust policy allowing GitHub's OIDC provider
@@ -195,7 +195,7 @@ jobs:
 
       # Step 2: Configure AWS credentials for ECS deployment operations
       - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           # Assume the IAM role with permissions to update ECS services
           role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
