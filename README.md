@@ -254,7 +254,7 @@ docker-compose down -v
 ## 📈 Features
 
 ✅ 8 Microservices
-✅ 4-Level Event Deduplication
+✅ 4-Level Event Deduplication/Idempotency
 ✅ Kafka Event Streaming
 ✅ MongoDB Persistence
 ✅ Error Tracking & Monitoring
