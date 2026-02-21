@@ -1,0 +1,92 @@
+# =============================================================================
+# Dev Deployment — Reusable Workflow
+# =============================================================================
+# Called by pipeline.yml after a successful build on workflow_dispatch.
+# Deploys all 10 services to the dev ECS cluster in parallel.
+#
+# GitHub Environment required: dev
+#   Settings → Environments → dev
+#   → Variables: SPRING_PROFILE, MONGODB_URI, KAFKA_BROKERS, ECS_CLUSTER
+#   → No required reviewers (auto-deploy)
+# =============================================================================
+
+name: Deploy — Dev
+
+on:
+  workflow_call:
+    inputs:
+      image_tag:
+        description: 'Git commit SHA used as the Docker image tag'
+        required: true
+        type: string
+
+jobs:
+
+  deploy:
+    name: ${{ matrix.service }}
+    runs-on: ubuntu-latest
+
+    environment:
+      name: dev
+      url: https://dev.supplychain.example.com
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - consumer-service
+          - loader-service
+          - item-service
+          - trade-item-service
+          - supplier-supply-service
+          - shipment-service
+          - producer-service
+          - osp-mock-api
+          - producer-ui
+          - monitoring-ui
+
+    env:
+      ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Download task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition dev-supply-chain-${{ matrix.service }} \
+            --query 'taskDefinition' \
+            | jq 'del(.taskDefinitionArn,.revision,.status,
+                      .requiresAttributes,.compatibilities,
+                      .registeredAt,.registeredBy)' \
+            > task-def.json
+
+      - name: Patch environment variables
+        run: |
+          jq --arg profile "${{ vars.SPRING_PROFILE }}" \
+             --arg mongo   "${{ vars.MONGODB_URI }}" \
+             --arg kafka   "${{ vars.KAFKA_BROKERS }}" \
+             '.containerDefinitions[0].environment = [
+               {"name":"SPRING_PROFILES_ACTIVE",        "value":$profile},
+               {"name":"SPRING_DATA_MONGODB_URI",        "value":$mongo},
+               {"name":"SPRING_KAFKA_BOOTSTRAP_SERVERS", "value":$kafka}
+             ]' task-def.json > patched.json && mv patched.json task-def.json
+
+      - id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-def.json
+          container-name: ${{ matrix.service }}
+          image: ${{ env.ECR_REGISTRY }}/supply-chain-${{ matrix.service }}:dev-${{ inputs.image_tag }}
+
+      - uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: dev-supply-chain-${{ matrix.service }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          wait-for-service-stability: true

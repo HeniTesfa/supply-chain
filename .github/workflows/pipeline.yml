@@ -1,173 +1,77 @@
 # =============================================================================
-# CI/CD Pipeline — Unified Production-Grade Pipeline
+# CI/CD Pipeline — Orchestrator
 # =============================================================================
 #
-# STRICT LINEAR PROMOTION MODEL
+# LINEAR PROMOTION:  Build → dev.yml → stage.yml → prod.yml
 #
-#   feature/* push (CI)
-#   ─────────────────────────────────────────────────────
-#   [Build] — compile Maven + React + verify Docker images
-#             no images pushed, no deployment
-#
-#   workflow_dispatch (manual dev entry)
-#   ─────────────────────────────────────────────────────
-#   [Build] ──► [Deploy Dev] ──► [Promote Stage] ──► [Release Prod]
-#                (auto)           (manual approval)   (manual approval)
-#                env: dev         env: stage          env: prod
-#
-# Promotion rules (enforced by the `needs` chain):
-#   • Stage can only receive code that already passed Dev
-#   • Prod  can only receive code that already passed Stage
-#   • No skipping stages, no parallel promotions
-#
-# ─────────────────────────────────────────────────────────────────────────────
-# ONE-TIME GITHUB SETUP (do this before the first run)
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# 1. Environments (Settings → Environments):
-#      dev   — no required reviewers  (auto-deploy)
-#      stage — add required reviewers (manual approval gate)
-#      prod  — add required reviewers (manual approval gate)
-#
-# 2. Environment Variables (each environment → Variables):
-#      SPRING_PROFILE   e.g.  dev | staging | production
-#      MONGODB_URI      MongoDB connection string for that environment
-#      KAFKA_BROKERS    Kafka bootstrap servers for that environment
-#      ECS_CLUSTER      ECS cluster name for that environment
-#
-# 3. Repository Secrets (Settings → Secrets → Actions):
-#      AWS_ACCOUNT_ID   12-digit AWS account number
-#      AWS_REGION       e.g. us-east-1
-#      AWS_IAM_ROLE_ARN IAM role with OIDC trust + ECR/ECS permissions
-#
-# 4. AWS IAM Role trust policy must allow GitHub OIDC:
-#      Condition: token.actions.githubusercontent.com:sub
-#        = repo:<org>/<repo>:*
+# feature/* push     → Build only (no deployment, no AWS credentials needed)
+# workflow_dispatch  → Build → Deploy Dev → Promote Stage → Release Prod
+#                               (auto)        (approval)      (approval)
 # =============================================================================
 
 name: CI/CD Pipeline
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Triggers
-# ─────────────────────────────────────────────────────────────────────────────
 on:
-  # CI-only: any push to a feature/fix/hotfix/chore branch
-  # Runs the Build job but does NOT push images or deploy anything.
   push:
     branches:
-      - 'feature/**'    # e.g. feature/add-retry-logic
-      - 'feat/**'       # e.g. feat/kafka-dedup
-      - 'fix/**'        # e.g. fix/null-pointer-consumer
-      - 'hotfix/**'     # e.g. hotfix/missing-idempotency-key
-      - 'chore/**'      # e.g. chore/bump-spring-boot
-    # main and develop are intentionally excluded.
-    # They are protected branches — code reaches them only via reviewed PRs.
-
-  # Manual deploy entry point: developer selects a branch and triggers the
-  # full Build → Dev → Stage → Prod promotion chain.
+      - 'feature/**'
+      - 'feat/**'
+      - 'fix/**'
+      - 'hotfix/**'
+      - 'chore/**'
   workflow_dispatch:
     inputs:
       reason:
         description: 'Reason for manual deployment (optional)'
         required: false
-        default: 'Manual dev validation'
+        default: ''
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Global Environment Variables
-# ─────────────────────────────────────────────────────────────────────────────
 env:
-  # ECR registry URL: <account_id>.dkr.ecr.<region>.amazonaws.com
-  # Constructed from secrets so no AWS account details are hardcoded.
   ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
-
-  # Use the full 40-char commit SHA as the image tag.
-  # This creates an exact 1-to-1 mapping between a deployed image and source.
   IMAGE_TAG: ${{ github.sha }}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Concurrency: one active pipeline run per branch.
-# A new push to feature/foo cancels any in-progress run for feature/foo.
-# ─────────────────────────────────────────────────────────────────────────────
 concurrency:
   group: pipeline-${{ github.ref }}
   cancel-in-progress: true
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Permissions
-# ─────────────────────────────────────────────────────────────────────────────
 permissions:
-  contents: write   # Required to push git release tags in release-prod
-  id-token: write   # Required for AWS OIDC token exchange
+  contents: write   # create git release tags
+  id-token: write   # AWS OIDC
 
-# =============================================================================
-# JOBS
-# =============================================================================
 jobs:
 
-  # ===========================================================================
-  # Job 1: Build
-  # ===========================================================================
-  # Runs on EVERY trigger (feature push and workflow_dispatch).
-  #
-  # What it does:
-  #   • Compiles all 9 Maven modules and verifies there are no compile errors
-  #   • Builds both React applications (CI=true treats warnings as errors)
-  #   • Builds Docker images for all 10 services
-  #       – feature push:        build only, no push  (Dockerfile syntax check)
-  #       – workflow_dispatch:   build AND push images tagged dev-<sha> to ECR
-  #
-  # Docker images are built sequentially via a bash loop so Maven and React
-  # compile steps can run once (with cache) before any Docker work starts,
-  # keeping the job lean and avoiding redundant compilation.
-  # ===========================================================================
+  # ---------------------------------------------------------------------------
+  # Build: compile Maven + React + build Docker images
+  #   feature push      → build only, no push (Dockerfile verification)
+  #   workflow_dispatch → build + push dev-<sha> images to ECR
+  # ---------------------------------------------------------------------------
   build:
-    name: Build
+    name: Build & Verify
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v4
 
-      # ── Source ──────────────────────────────────────────────────────────────
-      - name: Checkout source code
-        uses: actions/checkout@v4
-
-      # ── Backend: Maven ───────────────────────────────────────────────────────
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
-          # Cache ~/.m2/repository keyed on a hash of all pom.xml files.
-          # Subsequent runs skip dependency downloads when pom.xml is unchanged.
           cache: 'maven'
 
-      - name: Compile all backend services (Maven)
-        # -DskipTests: tests run in CI on PRs — no need to repeat here.
-        # -B: batch mode for clean CI output.
+      - name: Maven compile (all modules)
         run: mvn clean package -DskipTests -B
 
-      - name: Upload compiled JARs
-        # JARs are uploaded so Docker builds (which re-use COPY target/*.jar)
-        # don't need to re-download Maven deps inside the Dockerfile build stage.
-        uses: actions/upload-artifact@v4
-        with:
-          name: service-jars-${{ github.run_id }}
-          path: '**/target/*.jar'
-          retention-days: 1
-
-      # ── Frontend: React ──────────────────────────────────────────────────────
-      - name: Set up Node.js 18
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '18'
           cache: 'npm'
-          # Cache key based on producer-ui's lock file.
           cache-dependency-path: producer-ui/package-lock.json
 
       - name: Build Producer UI
         working-directory: producer-ui
         run: npm ci && npm run build
         env:
-          CI: true   # Treat React warnings as errors
+          CI: true
 
       - name: Build Monitoring UI
         working-directory: monitoring-ui
@@ -175,12 +79,9 @@ jobs:
         env:
           CI: true
 
-      # ── Docker: configure (always) ───────────────────────────────────────────
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v3
 
-      # ── Docker: AWS login (workflow_dispatch only) ────────────────────────────
-      - name: Configure AWS credentials via OIDC
+      - name: Configure AWS credentials
         if: github.event_name == 'workflow_dispatch'
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -191,469 +92,60 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ── Docker: build (feature push = verify only; workflow_dispatch = push) ──
-      # Loops over all 10 services and builds their Docker image.
-      # On feature push:      push=false  — verifies every Dockerfile compiles.
-      # On workflow_dispatch: push=true   — pushes dev-<sha> tag to ECR.
-      #
-      # Uses GHA build cache on feature pushes.
-      # Uses ECR registry cache on workflow_dispatch (persists between runs).
-      - name: Build Docker images (all services)
+      - name: Build Docker images
         env:
-          PUSH_IMAGES: ${{ github.event_name == 'workflow_dispatch' }}
+          PUSH: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           SERVICES=(
-            consumer-service
-            loader-service
-            item-service
-            trade-item-service
-            supplier-supply-service
-            shipment-service
-            producer-service
-            osp-mock-api
-            producer-ui
-            monitoring-ui
+            consumer-service loader-service item-service trade-item-service
+            supplier-supply-service shipment-service producer-service
+            osp-mock-api producer-ui monitoring-ui
           )
-
-          for SERVICE in "${SERVICES[@]}"; do
-            echo ""
-            echo "══════════════════════════════════════════"
-            echo "  Building: ${SERVICE}"
-            echo "══════════════════════════════════════════"
-
-            if [ "${PUSH_IMAGES}" = "true" ]; then
-              # workflow_dispatch path: build + push dev-<sha> to ECR.
-              # ECR registry cache (type=registry) persists across pipeline runs,
-              # giving faster rebuilds when only application code changes.
-              docker buildx build \
-                --push \
-                --tag "${ECR_REGISTRY}/supply-chain-${SERVICE}:dev-${IMAGE_TAG}" \
-                --file "./${SERVICE}/Dockerfile" \
-                --cache-from "type=registry,ref=${ECR_REGISTRY}/supply-chain-${SERVICE}:cache" \
-                --cache-to  "type=registry,ref=${ECR_REGISTRY}/supply-chain-${SERVICE}:cache,mode=max" \
-                .
-              echo "✓ Pushed: ${ECR_REGISTRY}/supply-chain-${SERVICE}:dev-${IMAGE_TAG}"
+          for S in "${SERVICES[@]}"; do
+            if [ "$PUSH" = "true" ]; then
+              docker buildx build --push \
+                --tag  "${ECR_REGISTRY}/supply-chain-${S}:dev-${IMAGE_TAG}" \
+                --file "./${S}/Dockerfile" \
+                --cache-from "type=registry,ref=${ECR_REGISTRY}/supply-chain-${S}:cache" \
+                --cache-to   "type=registry,ref=${ECR_REGISTRY}/supply-chain-${S}:cache,mode=max" \
+                . && echo "✓ pushed dev-${IMAGE_TAG} — ${S}"
             else
-              # feature push path: build only, no registry push.
-              # Uses ephemeral GHA cache to speed up subsequent feature-branch runs.
               docker buildx build \
-                --tag "supply-chain-${SERVICE}:${IMAGE_TAG}" \
-                --file "./${SERVICE}/Dockerfile" \
+                --tag  "supply-chain-${S}:${IMAGE_TAG}" \
+                --file "./${S}/Dockerfile" \
                 --cache-from "type=gha" \
-                --cache-to  "type=gha,mode=max" \
-                .
-              echo "✓ Built (no push): supply-chain-${SERVICE}:${IMAGE_TAG}"
+                --cache-to   "type=gha,mode=max" \
+                . && echo "✓ built (no push) — ${S}"
             fi
           done
 
-          echo ""
-          echo "═══════════════════════════════════════════════"
-          echo "  All Docker images built successfully"
-          if [ "${PUSH_IMAGES}" = "true" ]; then
-            echo "  Images pushed to ECR with tag: dev-${IMAGE_TAG}"
-          else
-            echo "  Feature-branch CI: images NOT pushed (no AWS creds needed)"
-          fi
-          echo "═══════════════════════════════════════════════"
-
-  # ===========================================================================
-  # Job 2: Deploy to Dev
-  # ===========================================================================
-  # Only runs when the workflow is triggered manually (workflow_dispatch).
-  # On a plain feature/* push this job is skipped entirely.
-  #
-  # Uses the 'dev' GitHub Environment (no approval gate — auto-deploy).
-  # Environment variables (MONGODB_URI, KAFKA_BROKERS, etc.) come from the
-  # 'dev' environment configuration in GitHub Settings → Environments → dev.
-  #
-  # Deploys all 10 services in parallel using a matrix strategy.
-  # Each matrix job:
-  #   1. Downloads the current ECS task definition
-  #   2. Injects env-specific variables (MongoDB URI, Kafka, Spring profile)
-  #   3. Swaps the container image to dev-<sha>
-  #   4. Registers a new task definition revision
-  #   5. Triggers a rolling ECS update and waits for stability
-  # ===========================================================================
+  # ---------------------------------------------------------------------------
+  # Deploy Dev  (workflow_dispatch only — skipped on feature push)
+  # ---------------------------------------------------------------------------
   deploy-dev:
-    name: Deploy Dev — ${{ matrix.service }}
-    runs-on: ubuntu-latest
     needs: build
-    # Skip this entire job on plain feature/* pushes.
-    # Only the manual workflow_dispatch enters the deployment path.
     if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/dev.yml
+    with:
+      image_tag: ${{ github.sha }}
+    secrets: inherit
 
-    environment:
-      name: dev
-      url: https://dev.supplychain.example.com
-
-    # ── Matrix: deploy all 10 services in parallel ────────────────────────────
-    strategy:
-      fail-fast: false   # Show all failures at once, not just the first
-      matrix:
-        service:
-          - consumer-service
-          - loader-service
-          - item-service
-          - trade-item-service
-          - supplier-supply-service
-          - shipment-service
-          - producer-service
-          - osp-mock-api
-          - producer-ui
-          - monitoring-ui
-
-    # ── Environment-specific variables ────────────────────────────────────────
-    # These come from: Settings → Environments → dev → Variables
-    # Each environment (dev/stage/prod) has its own values for these variables.
-    env:
-      SPRING_PROFILE: ${{ vars.SPRING_PROFILE }}   # dev
-      MONGODB_URI:    ${{ vars.MONGODB_URI }}       # dev MongoDB URI
-      KAFKA_BROKERS:  ${{ vars.KAFKA_BROKERS }}     # dev Kafka bootstrap servers
-      ECS_CLUSTER:    ${{ vars.ECS_CLUSTER }}       # dev ECS cluster name
-
-    steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      # Download the current ECS task definition, stripping read-only fields
-      # that cannot be re-submitted when registering a new revision.
-      - name: Download current ECS task definition
-        run: |
-          aws ecs describe-task-definition \
-            --task-definition dev-supply-chain-${{ matrix.service }} \
-            --query 'taskDefinition' \
-            | jq 'del(.taskDefinitionArn, .revision, .status,
-                      .requiresAttributes, .compatibilities,
-                      .registeredAt, .registeredBy)' \
-            > task-definition.json
-
-      # Inject the environment-specific runtime variables into the task
-      # definition so ECS containers start with the correct configuration.
-      - name: Inject environment variables into task definition
-        run: |
-          jq \
-            --arg profile "$SPRING_PROFILE" \
-            --arg mongo   "$MONGODB_URI" \
-            --arg kafka   "$KAFKA_BROKERS" \
-            '.containerDefinitions[0].environment = [
-              {"name": "SPRING_PROFILES_ACTIVE",         "value": $profile},
-              {"name": "SPRING_DATA_MONGODB_URI",         "value": $mongo},
-              {"name": "SPRING_KAFKA_BOOTSTRAP_SERVERS",  "value": $kafka}
-            ]' task-definition.json > task-definition-patched.json
-          mv task-definition-patched.json task-definition.json
-
-      # Swap the container image to the newly built dev-<sha> image.
-      - name: Update container image in task definition
-        id: update-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: task-definition.json
-          container-name: ${{ matrix.service }}
-          image: ${{ env.ECR_REGISTRY }}/supply-chain-${{ matrix.service }}:dev-${{ env.IMAGE_TAG }}
-
-      # Register the new task definition revision and trigger a rolling deploy.
-      # wait-for-service-stability: true blocks until all new tasks are RUNNING
-      # and all old tasks are STOPPED (or times out after 10 minutes).
-      - name: Deploy to ECS dev
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          task-definition: ${{ steps.update-task-def.outputs.task-definition }}
-          service: dev-supply-chain-${{ matrix.service }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
-
-      - name: Verify dev deployment
-        run: |
-          STATUS=$(aws ecs describe-services \
-            --cluster "$ECS_CLUSTER" \
-            --services "dev-supply-chain-${{ matrix.service }}" \
-            --query 'services[0].deployments[0].rolloutState' \
-            --output text)
-          echo "Dev deployment — ${{ matrix.service }}: ${STATUS}"
-          if [ "${STATUS}" != "COMPLETED" ]; then
-            echo "::error::Dev deployment for ${{ matrix.service }} did not complete (${STATUS})"
-            exit 1
-          fi
-
-  # ===========================================================================
-  # Job 3: Promote to Stage
-  # ===========================================================================
-  # Gated by the 'stage' GitHub Environment — a reviewer must click
-  # "Approve and deploy" in the GitHub Actions UI before this job runs.
-  #
-  # CODE PROMOTION (not rebuild):
-  #   Re-tags the immutable dev-<sha> image to stage-<sha>.
-  #   No Maven or Docker build happens here — the exact binary that passed
-  #   dev is promoted, guaranteeing what you tested is what you deploy.
-  #
-  # Environment variables come from: Settings → Environments → stage → Variables
-  # ===========================================================================
+  # ---------------------------------------------------------------------------
+  # Promote Stage  (manual approval gate — configured on 'stage' environment)
+  # ---------------------------------------------------------------------------
   promote-stage:
-    name: Promote Stage — ${{ matrix.service }}
-    runs-on: ubuntu-latest
     needs: deploy-dev
+    uses: ./.github/workflows/stage.yml
+    with:
+      image_tag: ${{ github.sha }}
+    secrets: inherit
 
-    environment:
-      name: stage
-      url: https://staging.supplychain.example.com
-
-    strategy:
-      fail-fast: false
-      matrix:
-        service:
-          - consumer-service
-          - loader-service
-          - item-service
-          - trade-item-service
-          - supplier-supply-service
-          - shipment-service
-          - producer-service
-          - osp-mock-api
-          - producer-ui
-          - monitoring-ui
-
-    env:
-      SPRING_PROFILE: ${{ vars.SPRING_PROFILE }}   # staging
-      MONGODB_URI:    ${{ vars.MONGODB_URI }}       # staging MongoDB URI
-      KAFKA_BROKERS:  ${{ vars.KAFKA_BROKERS }}     # staging Kafka bootstrap servers
-      ECS_CLUSTER:    ${{ vars.ECS_CLUSTER }}       # staging ECS cluster name
-
-    steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      # Pull the dev image and push it under the stage tag.
-      # Same binary — only the tag changes. This is the image promotion pattern.
-      - name: Promote image dev-<sha> → stage-<sha>
-        run: |
-          DEV_IMAGE="${ECR_REGISTRY}/supply-chain-${{ matrix.service }}:dev-${IMAGE_TAG}"
-          STAGE_IMAGE="${ECR_REGISTRY}/supply-chain-${{ matrix.service }}:stage-${IMAGE_TAG}"
-
-          docker pull  "$DEV_IMAGE"
-          docker tag   "$DEV_IMAGE" "$STAGE_IMAGE"
-          docker push  "$STAGE_IMAGE"
-
-          echo "Promoted: ${DEV_IMAGE}"
-          echo "       →  ${STAGE_IMAGE}"
-
-      - name: Download current ECS task definition
-        run: |
-          aws ecs describe-task-definition \
-            --task-definition staging-supply-chain-${{ matrix.service }} \
-            --query 'taskDefinition' \
-            | jq 'del(.taskDefinitionArn, .revision, .status,
-                      .requiresAttributes, .compatibilities,
-                      .registeredAt, .registeredBy)' \
-            > task-definition.json
-
-      - name: Inject environment variables into task definition
-        run: |
-          jq \
-            --arg profile "$SPRING_PROFILE" \
-            --arg mongo   "$MONGODB_URI" \
-            --arg kafka   "$KAFKA_BROKERS" \
-            '.containerDefinitions[0].environment = [
-              {"name": "SPRING_PROFILES_ACTIVE",         "value": $profile},
-              {"name": "SPRING_DATA_MONGODB_URI",         "value": $mongo},
-              {"name": "SPRING_KAFKA_BOOTSTRAP_SERVERS",  "value": $kafka}
-            ]' task-definition.json > task-definition-patched.json
-          mv task-definition-patched.json task-definition.json
-
-      - name: Update container image in task definition
-        id: update-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: task-definition.json
-          container-name: ${{ matrix.service }}
-          image: ${{ env.ECR_REGISTRY }}/supply-chain-${{ matrix.service }}:stage-${{ env.IMAGE_TAG }}
-
-      - name: Deploy to ECS staging
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          task-definition: ${{ steps.update-task-def.outputs.task-definition }}
-          service: staging-supply-chain-${{ matrix.service }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
-
-      - name: Verify staging deployment
-        run: |
-          STATUS=$(aws ecs describe-services \
-            --cluster "$ECS_CLUSTER" \
-            --services "staging-supply-chain-${{ matrix.service }}" \
-            --query 'services[0].deployments[0].rolloutState' \
-            --output text)
-          echo "Staging deployment — ${{ matrix.service }}: ${STATUS}"
-          if [ "${STATUS}" != "COMPLETED" ]; then
-            echo "::error::Staging deployment for ${{ matrix.service }} did not complete (${STATUS})"
-            exit 1
-          fi
-
-  # ===========================================================================
-  # Job 4: Release to Production
-  # ===========================================================================
-  # Gated by the 'prod' GitHub Environment — a reviewer must approve before
-  # any prod action runs. This is the final gate in the promotion chain.
-  #
-  # CODE PROMOTION (not rebuild):
-  #   Re-tags stage-<sha> → prod-<sha> AND :latest.
-  #   The :latest tag gives ops a stable reference to the current production
-  #   image; prod-<sha> enables precise rollback to any past release.
-  #
-  # After all services are deployed successfully, ONE git tag is created:
-  #   vYYYY.MM.DD-<short-sha>  (e.g. v2026.02.21-a3f9b2c)
-  # This tag permanently marks the exact commit running in production.
-  #
-  # Environment variables come from: Settings → Environments → prod → Variables
-  # ===========================================================================
+  # ---------------------------------------------------------------------------
+  # Release Prod  (manual approval gate — configured on 'prod' environment)
+  # ---------------------------------------------------------------------------
   release-prod:
-    name: Release Prod — ${{ matrix.service }}
-    runs-on: ubuntu-latest
     needs: promote-stage
-
-    environment:
-      name: prod
-      url: https://supplychain.example.com
-
-    strategy:
-      fail-fast: false
-      matrix:
-        service:
-          - consumer-service
-          - loader-service
-          - item-service
-          - trade-item-service
-          - supplier-supply-service
-          - shipment-service
-          - producer-service
-          - osp-mock-api
-          - producer-ui
-          - monitoring-ui
-
-    env:
-      SPRING_PROFILE: ${{ vars.SPRING_PROFILE }}   # production
-      MONGODB_URI:    ${{ vars.MONGODB_URI }}       # prod MongoDB URI
-      KAFKA_BROKERS:  ${{ vars.KAFKA_BROKERS }}     # prod Kafka bootstrap servers
-      ECS_CLUSTER:    ${{ vars.ECS_CLUSTER }}       # prod ECS cluster name
-
-    steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      # Promote stage-<sha> → prod-<sha> AND :latest (no rebuild).
-      # :latest is the ops-friendly "current production" reference.
-      # prod-<sha> is the audit trail — maps to an exact commit.
-      - name: Promote image stage-<sha> → prod-<sha> + latest
-        run: |
-          STAGE_IMAGE="${ECR_REGISTRY}/supply-chain-${{ matrix.service }}:stage-${IMAGE_TAG}"
-          PROD_IMAGE="${ECR_REGISTRY}/supply-chain-${{ matrix.service }}:prod-${IMAGE_TAG}"
-          LATEST_IMAGE="${ECR_REGISTRY}/supply-chain-${{ matrix.service }}:latest"
-
-          docker pull  "$STAGE_IMAGE"
-          docker tag   "$STAGE_IMAGE" "$PROD_IMAGE"
-          docker tag   "$STAGE_IMAGE" "$LATEST_IMAGE"
-          docker push  "$PROD_IMAGE"
-          docker push  "$LATEST_IMAGE"
-
-          echo "Released: ${STAGE_IMAGE}"
-          echo "       →  ${PROD_IMAGE}"
-          echo "       →  ${LATEST_IMAGE}"
-
-      - name: Download current ECS task definition
-        run: |
-          aws ecs describe-task-definition \
-            --task-definition prod-supply-chain-${{ matrix.service }} \
-            --query 'taskDefinition' \
-            | jq 'del(.taskDefinitionArn, .revision, .status,
-                      .requiresAttributes, .compatibilities,
-                      .registeredAt, .registeredBy)' \
-            > task-definition.json
-
-      - name: Inject environment variables into task definition
-        run: |
-          jq \
-            --arg profile "$SPRING_PROFILE" \
-            --arg mongo   "$MONGODB_URI" \
-            --arg kafka   "$KAFKA_BROKERS" \
-            '.containerDefinitions[0].environment = [
-              {"name": "SPRING_PROFILES_ACTIVE",         "value": $profile},
-              {"name": "SPRING_DATA_MONGODB_URI",         "value": $mongo},
-              {"name": "SPRING_KAFKA_BOOTSTRAP_SERVERS",  "value": $kafka}
-            ]' task-definition.json > task-definition-patched.json
-          mv task-definition-patched.json task-definition.json
-
-      - name: Update container image in task definition
-        id: update-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: task-definition.json
-          container-name: ${{ matrix.service }}
-          image: ${{ env.ECR_REGISTRY }}/supply-chain-${{ matrix.service }}:prod-${{ env.IMAGE_TAG }}
-
-      - name: Deploy to ECS production
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          task-definition: ${{ steps.update-task-def.outputs.task-definition }}
-          service: prod-supply-chain-${{ matrix.service }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
-
-      - name: Verify production deployment
-        run: |
-          STATUS=$(aws ecs describe-services \
-            --cluster "$ECS_CLUSTER" \
-            --services "prod-supply-chain-${{ matrix.service }}" \
-            --query 'services[0].deployments[0].rolloutState' \
-            --output text)
-          echo "Production deployment — ${{ matrix.service }}: ${STATUS}"
-          if [ "${STATUS}" != "COMPLETED" ]; then
-            echo "::error::Production deployment for ${{ matrix.service }} did not complete (${STATUS})"
-            exit 1
-          fi
-
-      # Create a git release tag once — use consumer-service as the anchor.
-      # All 10 matrix jobs run in parallel; only one should push the tag.
-      - name: Create production release tag
-        if: matrix.service == 'consumer-service'
-        run: |
-          # Tag format: vYYYY.MM.DD-<7-char-sha>  e.g. v2026.02.21-a3f9b2c
-          RELEASE_TAG="v$(date -u +'%Y.%m.%d')-${IMAGE_TAG:0:7}"
-
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git tag -a "$RELEASE_TAG" -m "Production release ${RELEASE_TAG}
-
-Deployed by : ${{ github.actor }}
-Commit      : ${{ github.sha }}
-Branch      : ${{ github.ref_name }}
-Services    : consumer-service, loader-service, item-service,
-              trade-item-service, supplier-supply-service, shipment-service,
-              producer-service, osp-mock-api, producer-ui, monitoring-ui"
-
-          git push origin "$RELEASE_TAG"
-          echo "Created release tag: ${RELEASE_TAG}"
-          echo "https://github.com/${{ github.repository }}/releases/tag/${RELEASE_TAG}"
+    uses: ./.github/workflows/prod.yml
+    with:
+      image_tag: ${{ github.sha }}
+    secrets: inherit
