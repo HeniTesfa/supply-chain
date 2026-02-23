@@ -152,9 +152,10 @@ jobs:
       - name: Build Producer UI
         run: npm run build
         # Set CI=true so React's build script treats warnings as errors
-        # This catches potential issues that would be silently ignored in dev mode
+        # NODE_OPTIONS --openssl-legacy-provider fixes react-scripts 5 + Node 17+ OpenSSL compat
         env:
-          CI: true  # Treat React build warnings as errors in CI
+          CI: true
+          NODE_OPTIONS: --openssl-legacy-provider
 
       # Step 5: Upload the build output as an artifact
       # This can be used by downstream deployment jobs or for manual inspection
@@ -211,8 +212,8 @@ jobs:
       - name: Build Monitoring UI
         run: npm run build
         env:
-          # Treat warnings as errors during the React build process
           CI: true
+          NODE_OPTIONS: --openssl-legacy-provider
 
       # Step 5: Upload the build output as a workflow artifact
       - name: Upload build artifacts

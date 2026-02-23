@@ -65,19 +65,23 @@ jobs:
         with:
           node-version: '18'
           cache: 'npm'
-          cache-dependency-path: producer-ui/package-lock.json
+          cache-dependency-path: |
+            producer-ui/package-lock.json
+            monitoring-ui/package-lock.json
 
       - name: Build Producer UI
         working-directory: producer-ui
         run: npm ci && npm run build
         env:
           CI: true
+          NODE_OPTIONS: --openssl-legacy-provider
 
       - name: Build Monitoring UI
         working-directory: monitoring-ui
         run: npm ci && npm run build
         env:
           CI: true
+          NODE_OPTIONS: --openssl-legacy-provider
 
       - uses: docker/setup-buildx-action@v3
 
