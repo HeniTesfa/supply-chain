@@ -87,7 +87,7 @@ jobs:
         # Run this step even if the Maven build/test step fails
         # This ensures we can download and inspect test reports after failures
         if: always()
-        uses: actions/upload-artifact@v4  # Official GitHub action for artifact upload
+        uses: actions/upload-artifact@v7  # Official GitHub action for artifact upload
         with:
           # Name for the uploaded artifact bundle in the Actions UI
           name: backend-test-results
@@ -159,7 +159,7 @@ jobs:
       # Step 5: Upload the build output as an artifact
       # This can be used by downstream deployment jobs or for manual inspection
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # Descriptive name for the artifact in the Actions UI
           name: producer-ui-build
@@ -216,7 +216,7 @@ jobs:
 
       # Step 5: Upload the build output as a workflow artifact
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # Descriptive name for the artifact bundle
           name: monitoring-ui-build
