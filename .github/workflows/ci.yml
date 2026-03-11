@@ -278,7 +278,7 @@ jobs:
       # Step 2: Set up Docker Buildx for enhanced build capabilities
       # Buildx provides build caching, multi-platform support, and better performance
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3  # Official Docker action for Buildx setup
+        uses: docker/setup-buildx-action@v4  # Official Docker action for Buildx setup
 
       # Step 3: Build the Docker image for this matrix service
       # Uses docker/build-push-action which integrates with Buildx for caching
