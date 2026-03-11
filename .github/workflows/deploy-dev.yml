@@ -138,7 +138,7 @@ jobs:
           name: service-jars-${{ github.run_id }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build all Docker images (dev profile, no push)
         run: docker compose -f docker-compose-dev.yml build
