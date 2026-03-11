@@ -283,7 +283,7 @@ jobs:
       # Step 3: Build the Docker image for this matrix service
       # Uses docker/build-push-action which integrates with Buildx for caching
       - name: Build Docker image for ${{ matrix.service }}
-        uses: docker/build-push-action@v6  # Official Docker build and push action
+        uses: docker/build-push-action@v7  # Official Docker build and push action
         with:
           # Use the repository root as the Docker build context
           # This matches docker-compose.yml which sets context: . for all services
