@@ -170,7 +170,7 @@ jobs:
       # Step 5: Build the Docker image and push it to ECR
       # Uses the docker/build-push-action for efficient builds with caching
       - name: Build and push Docker image for ${{ matrix.service }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           # Use the repository root as the Docker build context
           # This matches docker-compose.yml where all services use context: .
